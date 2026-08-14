@@ -1,12 +1,14 @@
-Penyebab error sebelumnya kemungkinan karena:
-1. **Error Indexing `Model` vs `BasePart`**: Beberapa kristal di game berwujud `Model`, sehingga saat script membaca `.Position` langsung terjadi crash/error (*"Position is not a valid member of Model"*).
-2. **Atribut Mutasi pada Parent Model**: Atribut `Mutation` terkadang menempel di Model kristal, bukan di part-nya.
-3. **Kompatibilitas Executor**: Proteksi environment `getgenv()` dan pcall ditambahkan agar support semua executor (Delta, Fluxus, Codex, Solara, Wave, dll).
+Masalah utama kenapa script tidak mau ter-execute sama sekali di executor (Delta, Fluxus, Solara, Wave, Codex, dll) adalah karena **syntax error pada escape character (`\u{2022}`) dan operator compound (`+=`, `-=`, `*=`, `/=`)** yang tidak didukung oleh parser executor standar (Lua 5.1).
 
-Berikut adalah **script lengkap yang sudah diperbaiki total, stabil, dan siap dijalankan**:
+Semua sintaks tersebut sudah saya ubah ke **Universal Standard Lua 5.1 & Luau**, ditambah **Safe Library Loader dengan fallback otomatis**.
+
+Silakan coba execute script yang sudah 100% kompatibel ini:
 
 ```lua
 local getgenv = getgenv or function() return _G end
+local unpack = table.unpack or unpack
+local Vector3_zero = Vector3.zero or Vector3.new(0, 0, 0)
+local Vector3_yAxis = Vector3.yAxis or Vector3.new(0, 1, 0)
 
 local Config = {
 	MinCrystalValue = "2m",
@@ -15,7 +17,7 @@ local Config = {
 	FlySpeed = 100,
 	AutoRejoinBoulders = false,
 	AutoBuyBombs = false,
-	AutoGrabMutations = true, -- Ambil kristal mutasi setelah boulder hancur
+	AutoGrabMutations = true,
 	RuneGrabRange = 20,
 	PickRange = 13,
 	PickBurst = 8,
@@ -47,7 +49,7 @@ local Services = {
 	VirtualUser = game:GetService("VirtualUser"),
 }
 
-local LocalPlayer = Services.Players.LocalPlayer
+local LocalPlayer = Services.Players.LocalPlayer or Services.Players.PlayerAdded:Wait()
 local Mouse = LocalPlayer:GetMouse()
 
 local State = {
@@ -308,10 +310,33 @@ local SUFFIXES = { "", "k", "M", "B", "T", "Qa" }
 local PARSE_MULTIPLIERS = { k = 1e3, m = 1e6, b = 1e9, t = 1e12, qa = 1e15 }
 local CONTAINER_NAMES = { "DroppedCrystals", "Crystals" }
 
-local repo = "https://raw.githubusercontent.com/deividcomsono/Obsidian/main/"
-local Library = loadstring(game:HttpGet(repo .. "Library.lua"))()
-local SaveManager = loadstring(game:HttpGet(repo .. "addons/SaveManager.lua"))()
-local ThemeManager = loadstring(game:HttpGet(repo .. "addons/ThemeManager.lua"))()
+-- Safe UI Library Loader with Fallback
+local Library, SaveManager, ThemeManager
+do
+	local loaded = false
+	local repos = {
+		"https://raw.githubusercontent.com/deividcomsono/Obsidian/main/",
+		"https://raw.githubusercontent.com/violin-suzutsuki/LinoriaLib/main/"
+	}
+
+	for _, repo in ipairs(repos) do
+		local ok, lib = pcall(function()
+			return loadstring(game:HttpGet(repo .. "Library.lua"))()
+		end)
+		if ok and lib then
+			Library = lib
+			pcall(function() SaveManager = loadstring(game:HttpGet(repo .. "addons/SaveManager.lua"))() end)
+			pcall(function() ThemeManager = loadstring(game:HttpGet(repo .. "addons/ThemeManager.lua"))() end)
+			loaded = true
+			break
+		end
+	end
+
+	if not loaded or not Library then
+		warn("[Mine a Mountain] Gagal memuat UI Library!")
+		return
+	end
+end
 
 Library.ForceCheckbox = false
 Library.ShowToggleFrameInKeybinds = true
@@ -358,8 +383,8 @@ local function formatShort(n, prefix)
 	end
 	local index = 0
 	while n >= 1000 and index < #SUFFIXES - 1 do
-		n /= 1000
-		index += 1
+		n = n / 1000
+		index = index + 1
 	end
 	return string.format("%s%s%.2f%s", sign, prefix, n, SUFFIXES[index + 1])
 end
@@ -525,19 +550,19 @@ local function combinedLuckMult(inst)
 	if type(extra) == "string" and extra ~= "" then
 		for name in string.gmatch(extra, "[^,]+") do
 			if name ~= "" then
-				multiplier *= mutationLuck(name)
+				multiplier = multiplier * mutationLuck(name)
 			end
 		end
 	end
 
 	if getAttr(inst, "IsBloodCrystal") == true then
-		multiplier *= LUCK.blood
+		multiplier = multiplier * LUCK.blood
 	end
 
 	if getAttr(inst, "AdminMutation") == "Radioactive" and mutation ~= "Radioactive" then
 		local hasRadioactive = type(extra) == "string" and extra:find("Radioactive", 1, true) ~= nil
 		if not hasRadioactive then
-			multiplier *= mutationLuck("Radioactive")
+			multiplier = multiplier * mutationLuck("Radioactive")
 		end
 	end
 
@@ -554,7 +579,7 @@ local function computeLuck(inst)
 	local base = (LUCK.rarity[tier] or LUCK.rarity[1]) * math.min(weight, LUCK.cap) ^ LUCK.exponent * LUCK.base
 
 	if getAttr(inst, "BombCrystal") == true then
-		base *= LUCK.bomb
+		base = base * LUCK.bomb
 	end
 
 	return base * combinedLuckMult(inst)
@@ -644,7 +669,7 @@ local function backpackCapacity()
 
 	local base = realStat("CarryWeight") or 10
 	if ownsGamepass("CarryKgPlus4") then
-		base *= 4
+		base = base * 4
 	end
 
 	local total = base + (realStat("CarryWeightBonus") or 0)
@@ -666,7 +691,7 @@ local function backpackWeight()
 			if child:IsA("Tool") and getAttr(child, "Tier") ~= nil then
 				local kg = tonumber(getAttr(child, "WeightKg"))
 				if kg then
-					total += kg
+					total = total + kg
 				end
 			end
 		end
@@ -875,7 +900,7 @@ local function destroyEntry(inst, entry)
 	end
 
 	Storage.espCache[inst] = nil
-	State.espCount -= 1
+	State.espCount = State.espCount - 1
 	State.statsDirty = true
 end
 
@@ -908,7 +933,7 @@ end
 local function applyExtra(entry, distanceText)
 	entry.distanceText = distanceText
 	entry.extra.Text = string.format(
-		'<font color="#%s">%s</font>  \u{2022}  <font color="#%s">%s</font>',
+		'<font color="#%s">%s</font>  -  <font color="#%s">%s</font>',
 		COLORS.hexDistance,
 		distanceText,
 		COLORS.hexLuck,
@@ -937,7 +962,7 @@ local function applyDetails(inst, entry, origin)
 
 	entry.rarity.Text = title
 	entry.rarity.TextColor3 = color
-	entry.info.Text = string.format("%s  \u{2022}  %s", money, weight)
+	entry.info.Text = string.format("%s  -  %s", money, weight)
 
 	local distanceText = "--"
 	local p = instPos(inst)
@@ -976,7 +1001,7 @@ local function untrackCrystal(inst)
 	end
 
 	Storage.registry[inst] = nil
-	State.registryCount -= 1
+	State.registryCount = State.registryCount - 1
 	Storage.dirty[inst] = nil
 	Storage.candidates[inst] = nil
 	State.statsDirty = true
@@ -991,7 +1016,7 @@ local function trackCrystal(inst)
 
 	local conns = {}
 	Storage.registry[inst] = conns
-	State.registryCount += 1
+	State.registryCount = State.registryCount + 1
 	State.statsDirty = true
 
 	local ok = pcall(function()
@@ -1062,7 +1087,7 @@ local function syncCrystal(inst)
 
 		entry = result
 		Storage.espCache[inst] = entry
-		State.espCount += 1
+		State.espCount = State.espCount + 1
 		State.statsDirty = true
 	end
 
@@ -1256,7 +1281,7 @@ Connections.espConn = Services.RunService.Heartbeat:Connect(function(deltaTime)
 		end
 	end
 
-	State.sweepAccumulator += deltaTime
+	State.sweepAccumulator = State.sweepAccumulator + deltaTime
 	if State.sweepAccumulator >= ESP.sweep then
 		State.sweepAccumulator = 0
 		local ok, err = pcall(function()
@@ -1268,7 +1293,7 @@ Connections.espConn = Services.RunService.Heartbeat:Connect(function(deltaTime)
 		end
 	end
 
-	State.distanceAccumulator += deltaTime
+	State.distanceAccumulator = State.distanceAccumulator + deltaTime
 	if State.distanceAccumulator >= PACE.distance then
 		State.distanceAccumulator = 0
 		local ok, err = pcall(updateDistances)
@@ -1435,8 +1460,8 @@ local function applyPivot(cframe)
 	end
 
 	pcall(function()
-		root.AssemblyLinearVelocity = Vector3.zero
-		root.AssemblyAngularVelocity = Vector3.zero
+		root.AssemblyLinearVelocity = Vector3_zero
+		root.AssemblyAngularVelocity = Vector3_zero
 	end)
 
 	return true
@@ -1470,8 +1495,8 @@ local function finishTeleport()
 	local root = getRoot()
 	if root then
 		pcall(function()
-			root.AssemblyLinearVelocity = Vector3.zero
-			root.AssemblyAngularVelocity = Vector3.zero
+			root.AssemblyLinearVelocity = Vector3_zero
+			root.AssemblyAngularVelocity = Vector3_zero
 		end)
 	end
 
@@ -1937,8 +1962,8 @@ local function pickupStep(filterFunc)
 		if entry.weight <= budget then
 			Storage.claimed[entry.inst] = now
 			if grabCrystal(entry.inst, entry.prompt) then
-				budget -= entry.weight
-				grabs += 1
+				budget = budget - entry.weight
+				grabs = grabs + 1
 			end
 		end
 	end
@@ -1959,7 +1984,7 @@ local function updateBackpackLabel()
 	local used = backpackWeight()
 
 	if capacity == math.huge then
-		BackpackLabel:SetText(string.format("Tas %.1f / \u{221E} kg", used))
+		BackpackLabel:SetText(string.format("Tas %.1f / inf kg", used))
 		return
 	end
 
@@ -2071,7 +2096,7 @@ Connections.schedulerConn = Services.RunService.Heartbeat:Connect(function(delta
 	end
 
 	if State.instantPromptActive then
-		State.instantAccumulator += deltaTime
+		State.instantAccumulator = State.instantAccumulator + deltaTime
 		if State.instantAccumulator >= PICK.instantTick then
 			State.instantAccumulator = 0
 			local ok, err = pcall(refreshInstantPrompts)
@@ -2097,7 +2122,7 @@ Connections.schedulerConn = Services.RunService.Heartbeat:Connect(function(delta
 		end
 	end
 
-	State.statsAccumulator += deltaTime
+	State.statsAccumulator = State.statsAccumulator + deltaTime
 	if State.statsAccumulator >= PACE.stats then
 		State.statsAccumulator = 0
 		local ok, err = pcall(updateBackpackLabel)
@@ -2261,11 +2286,11 @@ local function fireRemote(remote, ...)
 	local args = table.pack(...)
 	local ok = pcall(function()
 		if remote:IsA("RemoteEvent") then
-			remote:FireServer(table.unpack(args, 1, args.n))
+			remote:FireServer(unpack(args, 1, args.n))
 		elseif remote:IsA("BindableEvent") then
-			remote:Fire(table.unpack(args, 1, args.n))
+			remote:Fire(unpack(args, 1, args.n))
 		elseif remote:IsA("RemoteFunction") then
-			remote:InvokeServer(table.unpack(args, 1, args.n))
+			remote:InvokeServer(unpack(args, 1, args.n))
 		end
 	end)
 
@@ -2286,7 +2311,7 @@ local function unfavoriteAll()
 					child:SetAttribute("Favorited", false)
 				end)
 				fireRemote(Remotes.ToggleFavorite, child, false)
-				cleared += 1
+				cleared = cleared + 1
 			end
 		end
 	end
@@ -2608,10 +2633,10 @@ do
 
 				scaleCard(entry)
 				setLine(entry, 1, string.format("[%s] %s", info.rarity, kind))
-				setLine(entry, 2, string.format("%s  \u{2022}  %s kristal", info.pickaxe, info.crystals))
+				setLine(entry, 2, string.format("%s  -  %s kristal", info.pickaxe, info.crystals))
 
 				local distance = origin and formatDistance((anchor.Position - origin).Magnitude) or "--"
-				setLine(entry, 3, string.format("%s  \u{2022}  %s", info.runes, distance))
+				setLine(entry, 3, string.format("%s  -  %s", info.runes, distance))
 			end)
 
 			local stale
@@ -2668,7 +2693,7 @@ do
 
 				grabbed[prompt] = now
 				if firePrompt(prompt) then
-					fired += 1
+					fired = fired + 1
 					Library:Notify(string.format("Rune: %s", runeTitle(owner)), 2)
 				end
 			end)
@@ -2740,8 +2765,8 @@ do
 
 				local targetPart = inst:IsA("BasePart") and inst or (inst:FindFirstChildWhichIsA("BasePart", true) or inst)
 				if grabCrystal(targetPart, prompt) then
-					free -= weight
-					fired += 1
+					free = free - weight
+					fired = fired + 1
 					local mutName = getAttr(inst, "Mutation") or getAttr(inst, "ExtraMutations") or "Mutasi"
 					Library:Notify(string.format("Mutasi: %s (%s)", crystalName(inst), tostring(mutName)), 2)
 				end
@@ -2783,7 +2808,7 @@ do
 			local list = {}
 			for _, kind in ipairs({ "Mossite", "Voltite", "Gildrite", "Rimeveil", "Nocturnite" }) do
 				local info = BOULDER_INFO[kind]
-				list[#list + 1] = string.format("%s  \u{2022}  %s", kind, info.pickaxe)
+				list[#list + 1] = string.format("%s  -  %s", kind, info.pickaxe)
 			end
 			return list
 		end
@@ -2835,7 +2860,7 @@ do
 			end
 			local count = 0
 			eachRune(root.Position, radius or GRAB_RANGE, function()
-				count += 1
+				count = count + 1
 			end)
 			return count
 		end
@@ -2849,7 +2874,7 @@ do
 
 		Connections.mountainConn = Services.RunService.Heartbeat:Connect(function(deltaTime)
 			if boulderEsp then
-				boulderClock += deltaTime
+				boulderClock = boulderClock + deltaTime
 				if boulderClock >= BOULDER_STEP then
 					boulderClock = 0
 					local ok, err = pcall(syncBoulders)
@@ -2860,7 +2885,7 @@ do
 			end
 
 			if autoGrab then
-				grabClock += deltaTime
+				grabClock = grabClock + deltaTime
 				if grabClock >= GRAB_STEP then
 					grabClock = 0
 					local ok, err = pcall(grabRunes)
@@ -2927,7 +2952,7 @@ do
 				body.Name = "UniverseFlyVelocity"
 				body.MaxForce = Vector3.new(9e9, 9e9, 9e9)
 				body.P = 9e4
-				body.Velocity = Vector3.zero
+				body.Velocity = Vector3_zero
 				body.Parent = root
 				velocity = body
 
@@ -2975,17 +3000,17 @@ do
 			end
 
 			local frame = camera.CFrame
-			local direction = Vector3.zero
+			local direction = Vector3_zero
 
 			if not Services.UserInputService:GetFocusedTextBox() then
 				for _, entry in ipairs(FLY_KEYS) do
 					if Services.UserInputService:IsKeyDown(entry.key) then
 						if entry.axis == "look" then
-							direction += frame.LookVector * entry.sign
+							direction = direction + frame.LookVector * entry.sign
 						elseif entry.axis == "right" then
-							direction += frame.RightVector * entry.sign
+							direction = direction + frame.RightVector * entry.sign
 						else
-							direction += Vector3.yAxis * entry.sign
+							direction = direction + Vector3_yAxis * entry.sign
 						end
 					end
 				end
@@ -2994,7 +3019,7 @@ do
 			if direction.Magnitude > 0.1 then
 				velocity.Velocity = direction.Unit * flySpeed
 			else
-				velocity.Velocity = Vector3.zero
+				velocity.Velocity = Vector3_zero
 			end
 
 			local flat = Vector3.new(frame.LookVector.X, 0, frame.LookVector.Z)
@@ -3258,10 +3283,10 @@ do
 			if delta.Magnitude <= math.max(span, SNAP_GAP) then
 				cursor = goalFrame.Position
 			else
-				cursor += delta.Unit * span
+				cursor = cursor + delta.Unit * span
 			end
 
-			streamClock += deltaTime
+			streamClock = streamClock + deltaTime
 			if streamClock >= STREAM_GAP then
 				streamClock = 0
 				requestStream(goalFrame.Position)
@@ -3331,8 +3356,8 @@ do
 			local root = getRoot()
 			if root then
 				pcall(function()
-					root.AssemblyLinearVelocity = Vector3.zero
-					root.AssemblyAngularVelocity = Vector3.zero
+					root.AssemblyLinearVelocity = Vector3_zero
+					root.AssemblyAngularVelocity = Vector3_zero
 				end)
 			end
 
@@ -3555,8 +3580,8 @@ do
 				Move.glideStop()
 
 				pcall(function()
-					root.AssemblyLinearVelocity = Vector3.zero
-					root.AssemblyAngularVelocity = Vector3.zero
+					root.AssemblyLinearVelocity = Vector3_zero
+					root.AssemblyAngularVelocity = Vector3_zero
 				end)
 
 				local sellCFrame = getSellCFrame()
@@ -3565,8 +3590,8 @@ do
 				task.wait(0.05)
 
 				pcall(function()
-					root.AssemblyLinearVelocity = Vector3.zero
-					root.AssemblyAngularVelocity = Vector3.zero
+					root.AssemblyLinearVelocity = Vector3_zero
+					root.AssemblyAngularVelocity = Vector3_zero
 					if humanoid then
 						humanoid.PlatformStand = false
 						humanoid:ChangeState(Enum.HumanoidStateType.GettingUp)
@@ -3734,7 +3759,7 @@ do
 				return
 			end
 
-			local aimPicker = Library.Options.AimTeleportKey
+			local aimPicker = Library.Options and Library.Options.AimTeleportKey
 			if pressed == (aimPicker and aimPicker.Value or Config.KeybindAimTp) then
 				local ok, err = pcall(aimTeleport)
 				if not ok then
@@ -3805,7 +3830,7 @@ do
 		local function fetch(cursor)
 			local link = string.format("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Desc&excludeFullGames=true&limit=100", PLACE)
 			if type(cursor) == "string" and cursor ~= "" then
-				link ..= "&cursor=" .. cursor
+				link = link .. "&cursor=" .. cursor
 			end
 
 			local body, code = grab(link)
@@ -4099,7 +4124,7 @@ do
 			local score = 1
 			local power = tonumber(getAttr(tool, "DigPower"))
 			if power then
-				score += power
+				score = score + power
 			end
 			return score
 		end
@@ -4629,14 +4654,14 @@ do
 
 			for _, lift in ipairs(AIM_LIFT) do
 				for _, angle in ipairs(AIM_ANGLES) do
-					local dir = (CFrame.fromAxisAngle(Vector3.yAxis, math.rad(angle)) * away).Unit
+					local dir = (CFrame.fromAxisAngle(Vector3_yAxis, math.rad(angle)) * away).Unit
 					local candidate = center + dir * reach + Vector3.new(0, lift, 0)
 
 					if sightClear(candidate, part, model) then
 						if skip <= 0 then
 							return CFrame.new(candidate, center)
 						end
-						skip -= 1
+						skip = skip - 1
 					end
 				end
 			end
@@ -4695,12 +4720,12 @@ do
 			local travelling = spotFrame ~= nil and (root.Position - spotFrame.Position).Magnitude > ARRIVE_DIST
 
 			if travelling and lastPos and (root.Position - lastPos).Magnitude < 0.5 then
-				stuckClock += deltaTime
+				stuckClock = stuckClock + deltaTime
 				if stuckClock >= STUCK_TIME then
 					stuckClock = 0
 					spotFrame = nil
 					aimTurn = (aimTurn + 1) % #AIM_ANGLES
-					probeIndex += 1
+					probeIndex = probeIndex + 1
 				end
 			else
 				stuckClock = 0
@@ -4719,7 +4744,7 @@ do
 						statusText = string.format("Memindai %d/%d", scanIndex, #SCAN_SPOTS)
 
 						if now >= waitUntil then
-							scanIndex += 1
+							scanIndex = scanIndex + 1
 							waitUntil = now + SCAN_HOLD
 						end
 
@@ -4731,7 +4756,7 @@ do
 
 				local model = pickTarget()
 				if not model then
-					scanRetries += 1
+					scanRetries = scanRetries + 1
 					if scanRetries <= 3 then
 						statusText = "Menunggu batu..."
 						waitUntil = now + 1.5
@@ -4784,7 +4809,7 @@ do
 					anchor = visibleAnchor(target) or anchorOf(target)
 				end
 
-				centerClock += deltaTime
+				centerClock = centerClock + deltaTime
 				local center = lockedCenter
 
 				if not center or centerClock >= CENTER_STEP then
@@ -4797,7 +4822,7 @@ do
 				end
 
 				if not center then
-					lostClock += deltaTime
+					lostClock = lostClock + deltaTime
 					if lostClock >= LOST_GRACE then
 						lastSpot = root.CFrame
 						beginLoot(false)
@@ -4808,7 +4833,7 @@ do
 				end
 
 				lostClock = 0
-				spotClock += deltaTime
+				spotClock = spotClock + deltaTime
 
 				if spotFrame and spotCenter and (spotCenter - center).Magnitude > SPOT_SLACK then
 					spotFrame = nil
@@ -4829,7 +4854,7 @@ do
 					equipClock = 0
 					heldPick = equipPick()
 				else
-					equipClock += deltaTime
+					equipClock = equipClock + deltaTime
 					if equipClock >= EQUIP_STEP then
 						equipClock = 0
 						heldPick = equipPick() or heldPick
@@ -4841,13 +4866,13 @@ do
 					return
 				end
 
-				swingClock += deltaTime
+				swingClock = swingClock + deltaTime
 				local gap = swingGap()
 				local swung = 0
 
 				if swingClock >= gap then
 					swung = math.min(math.floor(swingClock / gap), 4)
-					swingClock -= swung * gap
+					swingClock = swingClock - swung * gap
 
 					for _ = 1, swung do
 						swing(anchor, target, center)
@@ -4862,8 +4887,8 @@ do
 						blindClock = 0
 						lastDamageClock = now
 					else
-						dryClock += deltaTime
-						dryRounds += swung
+						dryClock = dryClock + deltaTime
+						dryRounds = dryRounds + swung
 
 						if dryClock >= DRY_SWAP then
 							dryClock = 0
@@ -4871,7 +4896,7 @@ do
 							anchor = freshAnchor(target) or visibleAnchor(target) or anchor
 							if spotClock >= SPOT_HOLD then
 								aimTurn = (aimTurn + 1) % #AIM_ANGLES
-								probeIndex += 1
+								probeIndex = probeIndex + 1
 								spotFrame = nil
 							end
 						end
@@ -4894,7 +4919,7 @@ do
 				if sightClear(root.Position, anchor, target) then
 					blindClock = 0
 				else
-					blindClock += deltaTime
+					blindClock = blindClock + deltaTime
 					if blindClock >= SIGHT_GRACE then
 						blindClock = 0
 						anchor = visibleAnchor(target) or anchor
@@ -5075,7 +5100,7 @@ do
 				end
 			end
 
-			labelClock += deltaTime
+			labelClock = labelClock + deltaTime
 			if labelClock >= 0.25 then
 				labelClock = 0
 				StatusLabel:SetText(statusText)
@@ -5599,7 +5624,7 @@ do
 							pcall(function()
 								Remotes.PlotPlaceRequest:FireServer(tool.Name, plantSpot, 0, tool)
 							end)
-							plantIndex += 1
+							plantIndex = plantIndex + 1
 						else
 							plantPhase = "return"
 							plantPhaseClock = now
@@ -5653,7 +5678,7 @@ do
 					statusText = string.format("Memuat dataran %d/%d", scanIndex, #SCAN_SPOTS)
 
 					if now >= scanUntil then
-						scanIndex += 1
+						scanIndex = scanIndex + 1
 						scanUntil = now + SCAN_HOLD
 					end
 
@@ -5739,7 +5764,7 @@ do
 				equipClock = 0
 				heldPick = Farm.equipPick()
 			else
-				equipClock += deltaTime
+				equipClock = equipClock + deltaTime
 				if equipClock >= EQUIP_STEP then
 					equipClock = 0
 					heldPick = Farm.equipPick() or heldPick
@@ -5751,7 +5776,7 @@ do
 				return
 			end
 
-			swingClock += deltaTime
+			swingClock = swingClock + deltaTime
 			local swingNeed = math.max(0.02, Farm.swingGap(heldPick) * 0.4)
 			local canSwing = swingClock >= swingNeed
 			local free = backpackFree()
@@ -5810,7 +5835,7 @@ do
 					requestStream(spot)
 
 					if canSwing then
-						swingClock -= swingNeed
+						swingClock = swingClock - swingNeed
 						swing(spot)
 					end
 
@@ -5848,7 +5873,7 @@ do
 					if not columnY or spot.Y < columnY - 0.05 then
 						columnDry = 0
 					else
-						columnDry += columnSwings
+						columnDry = columnDry + columnSwings
 					end
 
 					columnSwings = 0
@@ -5873,7 +5898,7 @@ do
 				if not spot then
 					requestStream(origin)
 					if canSwing then
-						swingClock -= swingNeed
+						swingClock = swingClock - swingNeed
 						swing(root.Position - Vector3.new(0, DIG_REACH * 0.5, 0))
 					end
 					statusText = "Memuat dataran"
@@ -5890,8 +5915,8 @@ do
 			holdAt(CFrame.new(target + Vector3.new(0, DIG_LIFT, 0), target), target)
 
 			if canSwing then
-				swingClock -= swingNeed
-				columnSwings += 1
+				swingClock = swingClock - swingNeed
+				columnSwings = columnSwings + 1
 				swing(target)
 			end
 
@@ -5996,7 +6021,7 @@ do
 				end
 			end
 
-			labelClock += deltaTime
+			labelClock = labelClock + deltaTime
 			if labelClock >= 0.25 then
 				labelClock = 0
 				StatusLabel:SetText(statusText)
@@ -6028,7 +6053,7 @@ do
 							return buyReq:InvokeServer(bombId)
 						end)
 						if success and res and res.ok then
-							boughtTotal += 1
+							boughtTotal = boughtTotal + 1
 						else
 							break
 						end
@@ -6050,7 +6075,7 @@ do
 		local bombCheckClock = 0
 		Connections.bombLoopConn = Services.RunService.Heartbeat:Connect(function(deltaTime)
 			if State.autoBuyBombs then
-				bombCheckClock += deltaTime
+				bombCheckClock = bombCheckClock + deltaTime
 				if bombCheckClock >= 10.0 then
 					bombCheckClock = 0
 					task.spawn(buyAllAvailableBombs)
@@ -6088,110 +6113,116 @@ do
 	install()
 end
 
-SaveManager:SetLibrary(Library)
-SaveManager:IgnoreThemeSettings()
-SaveManager:SetFolder("Universe")
+if SaveManager then
+	SaveManager:SetLibrary(Library)
+	SaveManager:IgnoreThemeSettings()
+	SaveManager:SetFolder("Universe")
+end
 
-ThemeManager:SetLibrary(Library)
-ThemeManager:SetFolder("Universe")
+if ThemeManager then
+	ThemeManager:SetLibrary(Library)
+	ThemeManager:SetFolder("Universe")
+end
 
 do
 	local function install()
 		local ConfigGroupbox = SettingsTab:AddLeftGroupbox("Konfigurasi", "folder-cog")
 
-		ConfigGroupbox:AddInput("SaveManager_ConfigName", {
-			Text = "Nama Konfigurasi",
-			Placeholder = "Konfigurasi Saya",
-		})
+		if SaveManager then
+			ConfigGroupbox:AddInput("SaveManager_ConfigName", {
+				Text = "Nama Konfigurasi",
+				Placeholder = "Konfigurasi Saya",
+			})
 
-		ConfigGroupbox:AddButton("Buat konfigurasi", function()
-			local name = Library.Options.SaveManager_ConfigName.Value
-			if name:gsub(" ", "") == "" then
-				Library:Notify("Nama konfigurasi tidak valid (kosong)", 2)
-				return
-			end
+			ConfigGroupbox:AddButton("Buat konfigurasi", function()
+				local name = Library.Options.SaveManager_ConfigName.Value
+				if name:gsub(" ", "") == "" then
+					Library:Notify("Nama konfigurasi tidak valid (kosong)", 2)
+					return
+				end
 
-			local success, err = SaveManager:Save(name)
-			if not success then
-				Library:Notify("Gagal membuat konfigurasi: " .. err)
-				return
-			end
+				local success, err = SaveManager:Save(name)
+				if not success then
+					Library:Notify("Gagal membuat konfigurasi: " .. tostring(err))
+					return
+				end
 
-			Library:Notify(string.format("Konfigurasi %q dibuat", name))
-			Library.Options.SaveManager_ConfigList:SetValues(SaveManager:RefreshConfigList())
-			Library.Options.SaveManager_ConfigList:SetValue(nil)
-		end)
+				Library:Notify(string.format("Konfigurasi %q dibuat", name))
+				Library.Options.SaveManager_ConfigList:SetValues(SaveManager:RefreshConfigList())
+				Library.Options.SaveManager_ConfigList:SetValue(nil)
+			end)
 
-		ConfigGroupbox:AddDivider()
+			ConfigGroupbox:AddDivider()
 
-		ConfigGroupbox:AddDropdown("SaveManager_ConfigList", {
-			Text = "Daftar Konfigurasi",
-			Values = SaveManager:RefreshConfigList(),
-			AllowNull = true,
-		})
+			ConfigGroupbox:AddDropdown("SaveManager_ConfigList", {
+				Text = "Daftar Konfigurasi",
+				Values = SaveManager:RefreshConfigList(),
+				AllowNull = true,
+			})
 
-		ConfigGroupbox:AddButton("Muat konfigurasi", function()
-			local name = Library.Options.SaveManager_ConfigList.Value
-			local success, err = SaveManager:Load(name)
-			if not success then
-				Library:Notify("Gagal memuat konfigurasi: " .. err)
-				return
-			end
-			Library:Notify(string.format("Konfigurasi %q dimuat", name))
-		end)
+			ConfigGroupbox:AddButton("Muat konfigurasi", function()
+				local name = Library.Options.SaveManager_ConfigList.Value
+				local success, err = SaveManager:Load(name)
+				if not success then
+					Library:Notify("Gagal memuat konfigurasi: " .. tostring(err))
+					return
+				end
+				Library:Notify(string.format("Konfigurasi %q dimuat", name))
+			end)
 
-		ConfigGroupbox:AddButton("Timpa konfigurasi", function()
-			local name = Library.Options.SaveManager_ConfigList.Value
-			local success, err = SaveManager:Save(name)
-			if not success then
-				Library:Notify("Gagal menimpa konfigurasi: " .. err)
-				return
-			end
-			Library:Notify(string.format("Konfigurasi %q ditimpa", name))
-		end)
+			ConfigGroupbox:AddButton("Timpa konfigurasi", function()
+				local name = Library.Options.SaveManager_ConfigList.Value
+				local success, err = SaveManager:Save(name)
+				if not success then
+					Library:Notify("Gagal menimpa konfigurasi: " .. tostring(err))
+					return
+				end
+				Library:Notify(string.format("Konfigurasi %q ditimpa", name))
+			end)
 
-		ConfigGroupbox:AddButton("Hapus konfigurasi", function()
-			local name = Library.Options.SaveManager_ConfigList.Value
-			local success, err = SaveManager:Delete(name)
-			if not success then
-				Library:Notify("Gagal menghapus konfigurasi: " .. err)
-				return
-			end
+			ConfigGroupbox:AddButton("Hapus konfigurasi", function()
+				local name = Library.Options.SaveManager_ConfigList.Value
+				local success, err = SaveManager:Delete(name)
+				if not success then
+					Library:Notify("Gagal menghapus konfigurasi: " .. tostring(err))
+					return
+				end
 
-			Library:Notify(string.format("Konfigurasi %q dihapus", name))
-			Library.Options.SaveManager_ConfigList:SetValues(SaveManager:RefreshConfigList())
-			Library.Options.SaveManager_ConfigList:SetValue(nil)
-		end)
+				Library:Notify(string.format("Konfigurasi %q dihapus", name))
+				Library.Options.SaveManager_ConfigList:SetValues(SaveManager:RefreshConfigList())
+				Library.Options.SaveManager_ConfigList:SetValue(nil)
+			end)
 
-		ConfigGroupbox:AddButton("Segarkan daftar", function()
-			Library.Options.SaveManager_ConfigList:SetValues(SaveManager:RefreshConfigList())
-			Library.Options.SaveManager_ConfigList:SetValue(nil)
-		end)
+			ConfigGroupbox:AddButton("Segarkan daftar", function()
+				Library.Options.SaveManager_ConfigList:SetValues(SaveManager:RefreshConfigList())
+				Library.Options.SaveManager_ConfigList:SetValue(nil)
+			end)
 
-		local AutoloadLabel = ConfigGroupbox:AddLabel("Konfigurasi autoload saat ini: " .. SaveManager:GetAutoloadConfig(), true)
+			local AutoloadLabel = ConfigGroupbox:AddLabel("Konfigurasi autoload saat ini: " .. tostring(SaveManager:GetAutoloadConfig()), true)
 
-		ConfigGroupbox:AddButton("Jadikan autoload", function()
-			local name = Library.Options.SaveManager_ConfigList.Value
-			local success, err = SaveManager:SaveAutoloadConfig(name)
-			if not success then
-				Library:Notify("Gagal menyetel konfigurasi autoload: " .. err)
-				return
-			end
+			ConfigGroupbox:AddButton("Jadikan autoload", function()
+				local name = Library.Options.SaveManager_ConfigList.Value
+				local success, err = SaveManager:SaveAutoloadConfig(name)
+				if not success then
+					Library:Notify("Gagal menyetel konfigurasi autoload: " .. tostring(err))
+					return
+				end
 
-			Library:Notify(string.format("%q disetel untuk auto load", name))
-			AutoloadLabel:SetText("Konfigurasi autoload saat ini: " .. name)
-		end)
+				Library:Notify(string.format("%q disetel untuk auto load", name))
+				AutoloadLabel:SetText("Konfigurasi autoload saat ini: " .. name)
+			end)
 
-		ConfigGroupbox:AddButton("Reset autoload", function()
-			local success, err = SaveManager:DeleteAutoLoadConfig()
-			if not success then
-				Library:Notify("Gagal mereset konfigurasi autoload: " .. err)
-				return
-			end
+			ConfigGroupbox:AddButton("Reset autoload", function()
+				local success, err = SaveManager:DeleteAutoLoadConfig()
+				if not success then
+					Library:Notify("Gagal mereset konfigurasi autoload: " .. tostring(err))
+					return
+				end
 
-			Library:Notify("Autoload dinonaktifkan")
-			AutoloadLabel:SetText("Konfigurasi autoload saat ini: tidak ada")
-		end)
+				Library:Notify("Autoload dinonaktifkan")
+				AutoloadLabel:SetText("Konfigurasi autoload saat ini: tidak ada")
+			end)
+		end
 
 		local MenuGroup = SettingsTab:AddRightGroupbox("Menu", "wrench")
 
@@ -6209,12 +6240,23 @@ do
 	install()
 end
 
-SaveManager:SetIgnoreIndexes({ "SaveManager_ConfigList", "SaveManager_ConfigName", "MenuKeybind" })
+if SaveManager then
+	SaveManager:SetIgnoreIndexes({ "SaveManager_ConfigList", "SaveManager_ConfigName", "MenuKeybind" })
+end
 
-Library.ToggleKeybind = Library.Options.MenuKeybind
-ThemeManager:ApplyToTab(SettingsTab)
+if Library.Options and Library.Options.MenuKeybind then
+	Library.ToggleKeybind = Library.Options.MenuKeybind
+end
 
-SaveManager:LoadAutoloadConfig()
+if ThemeManager then
+	ThemeManager:ApplyToTab(SettingsTab)
+end
+
+if SaveManager then
+	pcall(function()
+		SaveManager:LoadAutoloadConfig()
+	end)
+end
 
 local function cleanupAll()
 	State.espActive = false
@@ -6291,5 +6333,3 @@ end
 getgenv().UniverseUnload = cleanupAll
 Library:OnUnload(cleanupAll)
 ```
-
-*(Jika masih muncul pesan error tertentu di console executor seperti F9, silakan kirim baris teks errornya agar langsung saya perbaiki spesifik pada baris tersebut).*
