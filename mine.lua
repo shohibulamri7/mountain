@@ -1,18 +1,3 @@
-**Bisa banget!** 
-
-Secara default di script sebelumnya, saat batu (*boulder*) hancur dan masuk ke fase `loot`, script hanya memprioritaskan pengambilan **Rune**. 
-
-Sekarang sudah ditambahkan fitur **Auto Ambil Kristal Mutasi**:
-1. **Deteksi Otomatis Mutasi**: Mendeteksi kristal yang memiliki atribut `Mutation`, `ExtraMutations`, `AdminMutation`, atau `IsBloodCrystal`.
-2. **Pengambilan di Fase Loot**: Saat batu pecah, script akan otomatis mengambil semua Rune dan Kristal Bermutasi yang ada di sekitar area reruntuhan.
-3. **Cek Kapasitas Tas**: Memastikan tas masih muat sebelum mengambil agar tidak macet / error.
-4. **Toggle di Menu UI**: Ditambahkan toggle **"Auto Ambil Kristal Mutasi"** di tab **Batu (Boulder Farm)**.
-
----
-
-### Full Script yang Sudah Diperbarui:
-
-```lua
 local Config = {
 	MinCrystalValue = "2m",
 	SpeedBoost = 35,
@@ -20,7 +5,6 @@ local Config = {
 	FlySpeed = 100,
 	AutoRejoinBoulders = false,
 	AutoBuyBombs = false,
-	AutoGrabMutations = true, -- Otomatis ambil kristal bermutasi setelah boulder hancur
 	RuneGrabRange = 20,
 	PickRange = 13,
 	PickBurst = 8,
@@ -64,7 +48,6 @@ local State = {
 	autoPickupActive = false,
 	instantPromptActive = false,
 	autoBuyBombs = false,
-	autoGrabMutations = Config.AutoGrabMutations,
 	minValue = 2000000,
 	valueFilter = true,
 	espScale = 0.7,
@@ -86,9 +69,6 @@ local State = {
 	streamMark = 0,
 	streamSpot = nil,
 	speedHooked = nil,
-	antiBurnActive = false,
-	antiBurnClock = 0,
-	miningDamageMultiplier = 6,
 }
 
 local Storage = {
@@ -323,22 +303,22 @@ Library.ShowToggleFrameInKeybinds = true
 
 local Window = Library:CreateWindow({
 	Title = "Mine a Mountain",
-	Footer = "Mine a Mountain | Dibuat oleh DonnieAzoff",
+	Footer = "Mine a Mountain | Made by DonnieAzoff",
 	AutoShow = true,
 	NotifySide = "Right",
 	ShowCustomCursor = false,
 })
 
 local Tabs = {
-	crystals = Window:AddTab("Kristal", "gem"),
-	players = Window:AddTab("Pemain", "users"),
-	boulders = Window:AddTab("Batu", "mountain"),
-	teleports = Window:AddTab("Teleportasi", "crosshair"),
+	crystals = Window:AddTab("Crystals", "gem"),
+	players = Window:AddTab("Players", "users"),
+	boulders = Window:AddTab("Boulders", "mountain"),
+	teleports = Window:AddTab("Teleports", "crosshair"),
 	farming = Window:AddTab("Farming", "pickaxe"),
-	movement = Window:AddTab("Pergerakan", "zap"),
+	movement = Window:AddTab("Movement", "zap"),
 }
 
-local SettingsTab = Window:AddTab("Pengaturan", "sliders-horizontal")
+local SettingsTab = Window:AddTab("Settings", "sliders-horizontal")
 
 local EspHolder = Instance.new("Folder")
 EspHolder.Name = "UniverseCrystalEsp"
@@ -706,28 +686,6 @@ local function isCrystal(inst)
 
 	crystalFlags[inst] = result
 	return result
-end
-
-local function hasMutation(inst)
-	if not isCrystal(inst) then
-		return false
-	end
-	local mut = getAttr(inst, "Mutation")
-	if type(mut) == "string" and mut ~= "" and mut ~= "None" then
-		return true
-	end
-	local extra = getAttr(inst, "ExtraMutations")
-	if type(extra) == "string" and extra ~= "" then
-		return true
-	end
-	local admin = getAttr(inst, "AdminMutation")
-	if type(admin) == "string" and admin ~= "" then
-		return true
-	end
-	if getAttr(inst, "IsBloodCrystal") == true then
-		return true
-	end
-	return false
 end
 
 local function rebuildContainers()
@@ -1201,7 +1159,7 @@ local StatsLabel
 Connections.espConn = Services.RunService.Heartbeat:Connect(function(deltaTime)
 	if State.statsDirty and StatsLabel then
 		State.statsDirty = false
-		StatsLabel:SetText(string.format("Melacak: %d  |  Tampil: %d", State.registryCount, State.espCount))
+		StatsLabel:SetText(string.format("Tracking: %d  |  Shown: %d", State.registryCount, State.espCount))
 	end
 
 	if not trackingEnabled() then
@@ -1282,8 +1240,8 @@ local function createPlayerEntry(player)
 	billboard.Parent = EspHolder
 
 	local textSize = playerTextSize()
-	local nameLabel, nameConstraint = newLabel("Nama", billboard, 0, 2, COLORS.player, false, textSize)
-	local distanceLabel, distanceConstraint = newLabel("Jarak", billboard, 1, 2, COLORS.extra, false, textSize)
+	local nameLabel, nameConstraint = newLabel("Name", billboard, 0, 2, COLORS.player, false, textSize)
+	local distanceLabel, distanceConstraint = newLabel("Distance", billboard, 1, 2, COLORS.extra, false, textSize)
 
 	nameLabel.Text = player.DisplayName
 
@@ -1628,35 +1586,6 @@ end)
 local pickupFound = {}
 local pickupSeen = {}
 
-local function grabCrystal(inst, prompt)
-	local sent = false
-
-	if Remotes.HoldComplete then
-		sent = pcall(function()
-			if Remotes.HoldComplete:IsA("RemoteEvent") then
-				Remotes.HoldComplete:FireServer(inst)
-			end
-		end)
-	end
-
-	if not prompt then
-		prompt = crystalPrompt(inst)
-	end
-
-	if prompt and prompt.Parent and firePrompt(prompt) then
-		sent = true
-	end
-
-	if not sent and typeof(fireclickdetector) == "function" then
-		local ok, detector = pcall(inst.FindFirstChildWhichIsA, inst, "ClickDetector", true)
-		if ok and detector then
-			sent = pcall(fireclickdetector, detector, 0)
-		end
-	end
-
-	return sent
-end
-
 local function pickupCandidates(free, origin, filterFunc)
 	local found = pickupFound
 	local seen = pickupSeen
@@ -1682,6 +1611,7 @@ local function pickupCandidates(free, origin, filterFunc)
 		if filterFunc and not filterFunc(child) then
 			return
 		end
+
 
 		local value = crystalValue(child)
 		if not meetsFilter(child, value) then
@@ -1743,6 +1673,35 @@ local function pickupCandidates(free, origin, filterFunc)
 	end)
 
 	return found
+end
+
+local function grabCrystal(inst, prompt)
+	local sent = false
+
+	if Remotes.HoldComplete then
+		sent = pcall(function()
+			if Remotes.HoldComplete:IsA("RemoteEvent") then
+				Remotes.HoldComplete:FireServer(inst)
+			end
+		end)
+	end
+
+	if not prompt then
+		prompt = crystalPrompt(inst)
+	end
+
+	if prompt and prompt.Parent and firePrompt(prompt) then
+		sent = true
+	end
+
+	if not sent and typeof(fireclickdetector) == "function" then
+		local ok, detector = pcall(inst.FindFirstChildWhichIsA, inst, "ClickDetector", true)
+		if ok and detector then
+			sent = pcall(fireclickdetector, detector, 0)
+		end
+	end
+
+	return sent
 end
 
 local function instantPromptPatch(prompt)
@@ -1880,7 +1839,7 @@ local function pickupStep(filterFunc)
 	if free <= 0 then
 		if now - State.lastBagWarn >= 8 then
 			State.lastBagWarn = now
-			Library:Notify("Tas penuh", 2)
+			Library:Notify("Backpack full", 2)
 		end
 		return
 	end
@@ -1930,12 +1889,12 @@ local function updateBackpackLabel()
 	local used = backpackWeight()
 
 	if capacity == math.huge then
-		BackpackLabel:SetText(string.format("Tas %.1f / \u{221E} kg", used))
+		BackpackLabel:SetText(string.format("Bag %.1f / \u{221E} kg", used))
 		return
 	end
 
 	local free = math.max(0, capacity - used)
-	BackpackLabel:SetText(string.format("Tas %.1f / %.1f kg\nBebas %.1f kg", used, capacity, free))
+	BackpackLabel:SetText(string.format("Bag %.1f / %.1f kg\nFree %.1f kg", used, capacity, free))
 end
 
 local function enforceSpeed(humanoid)
@@ -1997,25 +1956,6 @@ local function setSpeedBoost(value)
 end
 
 Connections.schedulerConn = Services.RunService.Heartbeat:Connect(function(deltaTime)
-	if State.antiBurnActive then
-		State.antiBurnClock = State.antiBurnClock + deltaTime
-		if State.antiBurnClock >= 0.25 then
-			State.antiBurnClock = 0
-			local char = LocalPlayer.Character
-			if char then
-				for _, child in ipairs(char:GetDescendants()) do
-					if child:IsA("Fire") or child.Name:lower():find("burn") or child.Name:lower():find("fire") then
-						pcall(function()
-							if child:IsA("ParticleEmitter") or child:IsA("Fire") or child:IsA("Script") or child:IsA("LocalScript") then
-								child:Destroy()
-							end
-						end)
-					end
-				end
-			end
-		end
-	end
-
 	if State.tpState then
 		local ok, err = pcall(function()
 			if not applyPivot(State.tpState.goal) then
@@ -2191,34 +2131,34 @@ end
 
 local function aimTeleport()
 	if not State.espActive then
-		Library:Notify("Aktifkan ESP Kristal terlebih dahulu", 3)
+		Library:Notify("Enable Crystal ESP first", 3)
 		return
 	end
 
 	local inst = getAimedCrystal()
 	if not inst then
-		Library:Notify("Tidak ada kristal yang dibidik", 2)
+		Library:Notify("No crystal aimed", 2)
 		return
 	end
 
 	if teleportTo(inst) then
 		Library:Notify(string.format("TP -> %s", crystalName(inst)), 2)
 	else
-		Library:Notify("Teleportasi gagal", 2)
+		Library:Notify("Teleport failed", 2)
 	end
 end
 
 local function tpToRank(scoreFn, rank, formatter)
 	local entry = sortedByScore(scoreFn)[rank]
 	if not entry or entry.score <= 0 then
-		Library:Notify(string.format("Tidak ada kristal untuk #%d", rank), 3)
+		Library:Notify(string.format("No crystal for #%d", rank), 3)
 		return
 	end
 
 	if teleportTo(entry.inst) then
 		Library:Notify(string.format("TP #%d %s (%s)", rank, crystalName(entry.inst), formatter(entry.inst, entry.score)), 3)
 	else
-		Library:Notify("Teleportasi gagal", 3)
+		Library:Notify("Teleport failed", 3)
 	end
 end
 
@@ -2304,8 +2244,6 @@ local function mountainSpan()
 	return Config.MountainRadius
 end
 
-local sellClock = 0
-
 local function getSellCFrame()
 	local things = Services.Workspace:FindFirstChild("Things")
 	local prox = things and things:FindFirstChild("SellProx")
@@ -2318,6 +2256,36 @@ local function getSellCFrame()
 		return CFrame.new(part.Position + Vector3.new(0, 3, 0), part.Position)
 	end
 	return CFrame.new(-45.85, 32, 1066.58)
+end
+
+local function doRemoteSell()
+	local now = os.clock()
+	if now - sellClock < 1.5 then
+		return false
+	end
+
+	sellClock = now
+	unfavoriteAll()
+	fireRemote(Remotes.SellRequest, "all")
+	return true
+end
+
+local function doSell()
+	local now = os.clock()
+	if now - sellClock < 1.5 then
+		return false
+	end
+
+	sellClock = now
+	unfavoriteAll()
+	fireRemote(Remotes.GoHome, "sell")
+
+	schedule(0.6, function()
+		unfavoriteAll()
+		fireRemote(Remotes.SellRequest, "all")
+	end)
+
+	return true
 end
 
 do
@@ -2337,7 +2305,7 @@ do
 
 		local GRAB_RANGE = Config.RuneGrabRange
 		local GRAB_STEP = 0.15
-		local GRAB_LIMIT = 6
+		local GRAB_LIMIT = 4
 		local GRAB_RETRY = 0.2
 
 		local boulderEsp = false
@@ -2579,7 +2547,7 @@ do
 
 				scaleCard(entry)
 				setLine(entry, 1, string.format("[%s] %s", info.rarity, kind))
-				setLine(entry, 2, string.format("%s  \u{2022}  %s kristal", info.pickaxe, info.crystals))
+				setLine(entry, 2, string.format("%s  \u{2022}  %s crystals", info.pickaxe, info.crystals))
 
 				local distance = origin and formatDistance((anchor.Position - origin).Magnitude) or "--"
 				setLine(entry, 3, string.format("%s  \u{2022}  %s", info.runes, distance))
@@ -2647,85 +2615,6 @@ do
 			return fired
 		end
 
-		local function grabMutations(radius)
-			local root = getRoot()
-			if not root then
-				return 0
-			end
-
-			local free = backpackFree()
-			if free <= 0 then
-				return 0
-			end
-
-			local now = os.clock()
-			local fired = 0
-			local seen = {}
-			radius = radius or 90
-
-			local function consider(inst)
-				if fired >= GRAB_LIMIT or free <= 0 then
-					return
-				end
-				if not inst or not inst.Parent or seen[inst] or getAttr(inst, "Collected") == true then
-					return
-				end
-				seen[inst] = true
-
-				if not hasMutation(inst) then
-					return
-				end
-
-				local weight = crystalWeight(inst)
-				if weight > free then
-					return
-				end
-
-				local dist = (inst.Position - root.Position).Magnitude
-				if dist > radius then
-					return
-				end
-
-				local prompt = crystalPrompt(inst)
-				local last = grabbed[inst] or (prompt and grabbed[prompt])
-				if last and now - last < GRAB_RETRY then
-					return
-				end
-
-				if prompt then
-					grabbed[prompt] = now
-				end
-				grabbed[inst] = now
-
-				if grabCrystal(inst, prompt) then
-					free -= weight
-					fired += 1
-					local mutName = getAttr(inst, "Mutation") or getAttr(inst, "ExtraMutations") or "Mutasi"
-					Library:Notify(string.format("Mutasi: %s (%s)", crystalName(inst), tostring(mutName)), 2)
-				end
-			end
-
-			for inst in pairs(Storage.registry) do
-				consider(inst)
-			end
-
-			eachContainer(function(container)
-				for _, child in ipairs(container:GetChildren()) do
-					if child:IsA("BasePart") then
-						consider(child)
-					elseif child:IsA("Model") then
-						for _, inner in ipairs(child:GetChildren()) do
-							if inner:IsA("BasePart") then
-								consider(inner)
-							end
-						end
-					end
-				end
-			end)
-
-			return fired
-		end
-
 		function Mountain.applyScale()
 			for _, entry in pairs(boulderCache) do
 				scaleCard(entry)
@@ -2767,15 +2656,6 @@ do
 			local ok, fired = pcall(grabRunes, radius)
 			if not ok then
 				reportError("runeGrab", fired)
-				return 0
-			end
-			return fired or 0
-		end
-
-		function Mountain.grabMutations(radius)
-			local ok, fired = pcall(grabMutations, radius)
-			if not ok then
-				reportError("mutationGrab", fired)
 				return 0
 			end
 			return fired or 0
@@ -3304,10 +3184,10 @@ end
 
 do
 	local function install()
-		local CrystalBox = Tabs.crystals:AddLeftGroupbox("ESP Kristal", "gem")
+		local CrystalBox = Tabs.crystals:AddLeftGroupbox("Crystal ESP", "gem")
 
 		CrystalBox:AddToggle("CrystalEsp", {
-			Text = "ESP Kristal",
+			Text = "Crystal ESP",
 			Default = false,
 			Callback = function(value)
 				State.espActive = value
@@ -3319,7 +3199,7 @@ do
 		})
 
 		CrystalBox:AddSlider("EspSize", {
-			Text = "Ukuran Kristal",
+			Text = "Crystal Size",
 			Default = 70,
 			Min = 40,
 			Max = 250,
@@ -3333,7 +3213,7 @@ do
 		})
 
 		CrystalBox:AddDivider()
-		CrystalBox:AddLabel("Nilai Min menyembunyikan kristal murah. Contoh: 500k, 2m, 1.5b. Kosong = tampil semua", true)
+		CrystalBox:AddLabel("Min Value hides and skips crystals worth less than this. Example: 500k, 2m, 1.5b. Empty shows everything", true)
 
 		local function setMinValue(text)
 			local parsed = parseValue(text)
@@ -3346,7 +3226,7 @@ do
 		end
 
 		CrystalBox:AddInput("EspMinValue", {
-			Text = "Nilai Min",
+			Text = "Min Value",
 			Default = Config.MinCrystalValue,
 			Placeholder = "2m",
 			Numeric = false,
@@ -3354,7 +3234,7 @@ do
 			Callback = setMinValue,
 		})
 
-		StatsLabel = CrystalBox:AddLabel("Melacak: 0  |  Tampil: 0")
+		StatsLabel = CrystalBox:AddLabel("Tracking: 0  |  Shown: 0")
 	end
 
 	install()
@@ -3362,10 +3242,10 @@ end
 
 do
 	local function install()
-		local PlayerBox = Tabs.players:AddLeftGroupbox("ESP Pemain", "users")
+		local PlayerBox = Tabs.players:AddLeftGroupbox("Player ESP", "users")
 
 		PlayerBox:AddToggle("PlayerEsp", {
-			Text = "ESP Pemain",
+			Text = "Player ESP",
 			Default = false,
 			Callback = function(value)
 				State.playerEspActive = value
@@ -3376,7 +3256,7 @@ do
 		})
 
 		PlayerBox:AddSlider("PlayerEspSize", {
-			Text = "Ukuran Pemain",
+			Text = "Player Size",
 			Default = 60,
 			Min = 40,
 			Max = 250,
@@ -3395,16 +3275,16 @@ end
 
 do
 	local function install()
-		local BoulderBox = Tabs.boulders:AddLeftGroupbox("ESP Batu", "mountain")
+		local BoulderBox = Tabs.boulders:AddLeftGroupbox("Boulder ESP", "mountain")
 
 		BoulderBox:AddToggle("BoulderEsp", {
-			Text = "ESP Batu",
+			Text = "Boulder ESP",
 			Default = false,
 			Callback = Mountain.setBoulderEsp,
 		})
 
 		BoulderBox:AddSlider("BoulderEspSize", {
-			Text = "Ukuran Batu",
+			Text = "Boulder Size",
 			Default = 60,
 			Min = 40,
 			Max = 250,
@@ -3429,7 +3309,7 @@ end
 
 do
 	local function install()
-		local TopBox = Tabs.teleports:AddLeftGroupbox("Kristal Teratas", "trophy")
+		local TopBox = Tabs.teleports:AddLeftGroupbox("Top Crystals", "trophy")
 
 		local function fmtValue(_, score)
 			return formatShort(score, "$")
@@ -3444,7 +3324,7 @@ do
 		end
 
 		for rank = 1, 3 do
-			TopBox:AddButton(string.format("Top %d Nilai", rank), function()
+			TopBox:AddButton(string.format("Top %d Value", rank), function()
 				tpToRank(crystalValue, rank, fmtValue)
 			end)
 		end
@@ -3452,7 +3332,7 @@ do
 		TopBox:AddDivider()
 
 		for rank = 1, 3 do
-			TopBox:AddButton(string.format("Top %d Keberuntungan", rank), function()
+			TopBox:AddButton(string.format("Top %d Luck", rank), function()
 				tpToRank(crystalLuck, rank, fmtLuck)
 			end)
 		end
@@ -3460,39 +3340,39 @@ do
 		TopBox:AddDivider()
 
 		for rank = 1, 3 do
-			TopBox:AddButton(string.format("Top %d Berat", rank), function()
+			TopBox:AddButton(string.format("Top %d Weight", rank), function()
 				tpToRank(crystalWeight, rank, fmtWeight)
 			end)
 		end
 
-		local TeleportBox = Tabs.teleports:AddRightGroupbox("Teleportasi", "crosshair")
+		local TeleportBox = Tabs.teleports:AddRightGroupbox("Teleports", "crosshair")
 
 		TeleportBox:AddToggle("AimTeleport", {
-			Text = "Teleport Bidik",
+			Text = "Aim Teleport",
 			Default = false,
 			Callback = function(value)
 				State.aimTpEnabled = value
 			end,
 		})
 
-		TeleportBox:AddLabel("Teleport Bidik"):AddKeyPicker("AimTeleportKey", {
+		TeleportBox:AddLabel("Aim Teleport"):AddKeyPicker("AimTeleportKey", {
 			Default = Config.KeybindAimTp,
 			NoUI = false,
-			Text = "Teleport Bidik",
+			Text = "Aim Teleport",
 			Mode = "Always",
 		})
 
 		TeleportBox:AddDivider()
 
-		TeleportBox:AddButton("TP ke Rumah", function()
+		TeleportBox:AddButton("TP Home", function()
 			if fireRemote(Remotes.GoHome, "home") then
-				Library:Notify("Teleportasi ke rumah", 2)
+				Library:Notify("Teleporting home", 2)
 			else
-				Library:Notify("Remote tidak tersedia", 2)
+				Library:Notify("Remote unavailable", 2)
 			end
 		end)
 
-		TeleportBox:AddButton("Jual Semua", function()
+		TeleportBox:AddButton("Sell All", function()
 			task.spawn(function()
 				local character = LocalPlayer.Character
 				local root = getRoot()
@@ -3500,7 +3380,7 @@ do
 
 				if not character or not root then
 					if Library then
-						Library:Notify("Karakter tidak ditemukan", 2)
+						Library:Notify("Character not found", 2)
 					end
 					return
 				end
@@ -3542,7 +3422,7 @@ do
 				fireRemote(Remotes.SellRequest, "all")
 
 				if Library then
-					Library:Notify("Teleport ke tempat penjualan dan menjual semua!", 3)
+					Library:Notify("Teleported to sell station and sold all!", 3)
 				end
 			end)
 		end)
@@ -3553,10 +3433,10 @@ end
 
 do
 	local function install()
-		local PickupBox = Tabs.farming:AddLeftGroupbox("Pengambilan", "pickaxe")
+		local PickupBox = Tabs.farming:AddLeftGroupbox("Pickup", "pickaxe")
 
 		PickupBox:AddToggle("AutoPickup", {
-			Text = "Auto Ambil",
+			Text = "Auto Pickup",
 			Default = false,
 			Callback = function(value)
 				State.autoPickupActive = value
@@ -3564,33 +3444,19 @@ do
 		})
 
 		PickupBox:AddToggle("InstantPrompt", {
-			Text = "Klaim Instan",
+			Text = "Instant Prompt",
 			Default = false,
 			Callback = setInstantPrompt,
 		})
 
 		PickupBox:AddToggle("AutoRunePickup", {
-			Text = "Auto Ambil Rune",
+			Text = "Auto Rune Pickup",
 			Default = false,
 			Callback = Mountain.setAutoGrab,
 		})
 
-		PickupBox:AddSlider("MiningDamageMultiplier", {
-			Text = "Pengali Damage Mining",
-			Default = 6,
-			Min = 1,
-			Max = 5000,
-			Rounding = 0,
-			Compact = false,
-			Callback = function(value)
-				State.miningDamageMultiplier = value
-			end,
-		})
-
-		PickupBox:AddLabel("Note: Angka ekstrem (>500) bisa bikin lag / DC!", true)
-
 		PickupBox:AddDivider()
-		BackpackLabel = PickupBox:AddLabel("Tas 0.0 / 0.0 kg", true)
+		BackpackLabel = PickupBox:AddLabel("Bag 0.0 / 0.0 kg", true)
 	end
 
 	install()
@@ -3598,22 +3464,22 @@ end
 
 do
 	local function install()
-		local MoveBox = Tabs.movement:AddLeftGroupbox("Pergerakan", "zap")
+		local MoveBox = Tabs.movement:AddLeftGroupbox("Movement", "zap")
 
 		MoveBox:AddToggle("SpeedBoost", {
-			Text = "Peningkat Kecepatan",
+			Text = "Speed Boost",
 			Default = false,
 			Callback = setSpeedBoost,
 		})
 
 		MoveBox:AddToggle("Noclip", {
-			Text = "Tembus Tembok",
+			Text = "Noclip",
 			Default = false,
 			Callback = Move.setNoclip,
 		})
 
 		MoveBox:AddToggle("InfJump", {
-			Text = "Lompat Tak Terbatas",
+			Text = "Inf Jump",
 			Default = false,
 			Callback = Move.setInfJump,
 		})
@@ -3621,29 +3487,19 @@ do
 		MoveBox:AddDivider()
 
 		MoveBox:AddToggle("Fly", {
-			Text = "Terbang",
+			Text = "Fly",
 			Default = false,
 			Callback = Move.setFly,
 		})
 
 		MoveBox:AddSlider("FlySpeed", {
-			Text = "Kecepatan Terbang",
+			Text = "Fly Speed",
 			Default = Config.FlySpeed,
 			Min = 20,
 			Max = 300,
 			Rounding = 0,
 			Compact = false,
 			Callback = Move.setFlySpeed,
-		})
-
-		local ProtectBox = Tabs.movement:AddRightGroupbox("Perlindungan", "shield")
-
-		ProtectBox:AddToggle("AntiBurn", {
-			Text = "Kebal Api/Bakar",
-			Default = false,
-			Callback = function(value)
-				State.antiBurnActive = value
-			end,
 		})
 	end
 
@@ -3860,21 +3716,21 @@ do
 					local choice = table.remove(pool)
 					if choice then
 						visited[choice] = true
-						note(string.format("coba %d  %s", round, string.sub(choice, 1, 8)))
+						note(string.format("try %d  %s", round, string.sub(choice, 1, 8)))
 
 						local sent, err = pcall(function()
 							Services.TeleportService:TeleportToPlaceInstance(PLACE, choice, LocalPlayer)
 						end)
 
 						if not sent then
-							note("diblokir  " .. tostring(err))
+							note("blocked  " .. tostring(err))
 						end
 
 						if #pool <= REFILL_MARK then
 							task.spawn(refill)
 						end
 					else
-						note(string.format("tidak ada server  http %d", lastCode))
+						note(string.format("no servers  http %d", lastCode))
 					end
 
 					task.wait(RETRY_STEP)
@@ -3955,8 +3811,10 @@ do
 		}
 
 		local PLACE_ID = game.PlaceId
+		local HOLD_DIST = 8
 		local SCAN_HOLD = 1.4
 		local SWING_GAP = 0.04
+		local SWING_BURST = 6
 		local SWING_FLOOR = 0.02
 		local COOLDOWN_KEYS = { "SwingCooldown", "DigCooldown", "Cooldown", "SwingSpeed", "DigSpeed" }
 		local AIM_ANGLES = { 0, 35, -35, 70, -70, 110, -110, 145, -145, 180 }
@@ -3964,6 +3822,8 @@ do
 		local SIGHT_GRACE = 1.5
 		local SIGHT_STEPS = 8
 		local LOST_GRACE = 1.8
+		local DRY_ROUNDS = 3
+		local DRY_TIME = 1.0
 		local PROBE_DIST = { 0, -3, 4, -5, 8 }
 		local CENTER_STEP = 0.75
 		local CENTER_SHIFT = 7
@@ -3992,7 +3852,6 @@ do
 
 		local active = false
 		local autoRejoin = Config.AutoRejoinBoulders
-		local autoGrabMutations = Config.AutoGrabMutations
 		local targets = {}
 		local phase = "idle"
 		local target, anchor
@@ -4014,7 +3873,7 @@ do
 		local partCursor = 0
 		local pendingFinish = false
 		local lootUntil = 0
-		local statusText = "Diam"
+		local statusText = "Idle"
 		local scanRetries = 0
 		local lastPos
 		local stuckClock = 0
@@ -4270,6 +4129,14 @@ do
 			return nil
 		end
 
+		local function coreFrame(core, part)
+			local look = part and part.Parent and part.Position or nil
+			if not look or (look - core).Magnitude < 1 then
+				look = core + Vector3.new(0, -2, 0)
+			end
+			return CFrame.new(core, look)
+		end
+
 		local function visibleAnchor(model)
 			if not model then
 				return nil
@@ -4397,7 +4264,7 @@ do
 			end
 
 			return pcall(function()
-				for index = 1, (State.miningDamageMultiplier or 6) do
+				for index = 1, SWING_BURST do
 					if index % 2 == 0 then
 						fireRemote(event, name, core)
 					else
@@ -4488,12 +4355,34 @@ do
 			if not model then
 				return nil
 			end
-			local hp = getAttr(model, "HP") or getAttr(model, "Health") or getAttr(model, "Hp") or getAttr(model, "CurrentHealth")
+			local hp = getAttr(model, "HP")
+			if hp == nil then
+				hp = getAttr(model, "Health")
+			end
+			if hp == nil then
+				hp = getAttr(model, "Hp")
+			end
+			if hp == nil then
+				hp = getAttr(model, "CurrentHealth")
+			end
 			return tonumber(hp)
 		end
 
 		local blacklistedBoulders = {}
 		local lastDamageClock = 0
+
+		local function swingGap(tool)
+			local pick = tool or heldPick
+			if pick then
+				for _, key in ipairs(COOLDOWN_KEYS) do
+					local value = tonumber(getAttr(pick, key))
+					if value and value > 0 then
+						return math.clamp(value, SWING_FLOOR, 0.5)
+					end
+				end
+			end
+			return SWING_GAP
+		end
 
 		local function pickTarget()
 			local root = getRoot()
@@ -4601,7 +4490,7 @@ do
 			pendingFinish = finish == true
 			lootUntil = os.clock() + LOOT_TIME
 			phase = "loot"
-			statusText = "Mengambil rune & mutasi"
+			statusText = "Looting runes"
 		end
 
 		local function stop()
@@ -4630,7 +4519,7 @@ do
 			centerClock = 0
 			spotClock = 0
 			table.clear(blacklistedBoulders)
-			statusText = "Diam"
+			statusText = "Idle"
 
 			Move.setFly(toggleValue("Fly"))
 			Move.setNoclip(toggleValue("Noclip"))
@@ -4640,11 +4529,12 @@ do
 		local function step(deltaTime)
 			local root = getRoot()
 			if not root then
-				statusText = "Menunggu karakter"
+				statusText = "Waiting for character"
 				return
 			end
 
 			local now = os.clock()
+
 			local travelling = spotFrame ~= nil and (root.Position - spotFrame.Position).Magnitude > ARRIVE_DIST
 
 			if travelling and lastPos and (root.Position - lastPos).Magnitude < 0.5 then
@@ -4669,7 +4559,7 @@ do
 
 					if scanIndex <= #SCAN_SPOTS then
 						hold(SCAN_SPOTS[scanIndex])
-						statusText = string.format("Memindai %d/%d", scanIndex, #SCAN_SPOTS)
+						statusText = string.format("Scanning %d/%d", scanIndex, #SCAN_SPOTS)
 
 						if now >= waitUntil then
 							scanIndex += 1
@@ -4686,14 +4576,14 @@ do
 				if not model then
 					scanRetries += 1
 					if scanRetries <= 3 then
-						statusText = "Menunggu batu..."
+						statusText = "Waiting for boulders..."
 						waitUntil = now + 1.5
 						return
 					end
 
 					scanRetries = 0
 					beginLoot(true)
-					statusText = "Penyapuan terakhir"
+					statusText = "Final rune sweep"
 					return
 				end
 
@@ -4724,7 +4614,7 @@ do
 					return
 				end
 
-				local kind = boulderKind(target) or "Batu"
+				local kind = boulderKind(target) or "Boulder"
 				local hp = boulderHealth(target)
 
 				if hp and hp <= 0 then
@@ -4756,7 +4646,7 @@ do
 						beginLoot(false)
 						return
 					end
-					statusText = string.format("Menahan %s", kind)
+					statusText = string.format("Holding %s", kind)
 					return
 				end
 
@@ -4790,7 +4680,7 @@ do
 				end
 
 				if not heldPick then
-					statusText = "Membekali pickaxe..."
+					statusText = "Equipping pickaxe..."
 					return
 				end
 
@@ -4836,11 +4726,11 @@ do
 						anchor = nil
 						spotFrame = nil
 						phase = "scan"
-						statusText = "Melewatkan batu tak terjangkau"
+						statusText = "Skipping unhittable boulder"
 						return
 					end
 
-					statusText = string.format("Menambang %s  %.0f hp", kind, hp)
+					statusText = string.format("Mining %s  %.0f hp", kind, hp)
 					return
 				end
 
@@ -4858,7 +4748,7 @@ do
 					end
 				end
 
-				statusText = string.format("Menambang %s", kind)
+				statusText = string.format("Mining %s", kind)
 				return
 			end
 
@@ -4868,24 +4758,21 @@ do
 				end
 
 				Mountain.grabNear(RUNE_SWEEP)
-				if autoGrabMutations then
-					Mountain.grabMutations(RUNE_SWEEP)
-				end
 
 				if now < lootUntil then
-					statusText = string.format("Mengambil rune & mutasi  %.1fs", lootUntil - now)
+					statusText = string.format("Looting runes  %.1fs", lootUntil - now)
 					return
 				end
 
 				if pendingFinish then
 					phase = "reset"
 					waitUntil = now + RESET_WAIT
-					statusText = "Rune & mutasi dikumpulkan"
+					statusText = "Runes collected"
 				else
 					target = nil
 					anchor = nil
 					phase = "scan"
-					statusText = "Batu berikutnya"
+					statusText = "Next boulder"
 				end
 
 				return
@@ -4897,13 +4784,13 @@ do
 				end
 
 				if autoRejoin then
-					statusText = "Memulai ulang server"
-					Library:Notify("Tidak ada batu tersisa - rejoin", 3)
+					statusText = "Restarting server"
+					Library:Notify("No boulders left - rejoining", 3)
 					stop()
 					restart()
 				else
-					statusText = "Memindai ulang gunung..."
-					Library:Notify("Tidak ada batu tersisa - memindai ulang dlm 4s", 3)
+					statusText = "Re-scanning mountain..."
+					Library:Notify("No boulders left - re-scanning in 4s", 3)
 					target = nil
 					anchor = nil
 					scanned = false
@@ -4936,7 +4823,7 @@ do
 			end
 
 			if not next(targets) then
-				Library:Notify("Pilih setidaknya satu batu", 2)
+				Library:Notify("Pick at least one boulder", 2)
 				local store = Library and Library.Toggles
 				local entry = store and store.AutoFarmBoulders
 				if entry and entry.SetValue then
@@ -4973,19 +4860,19 @@ do
 			spotCenter = nil
 			centerClock = 0
 			spotClock = 0
-			statusText = "Memulai"
+			statusText = "Starting"
 
 			Move.setFly(false)
 			Move.setNoclip(true)
 			Mountain.setAutoGrab(true)
 		end
 
-		local FarmBox = Tabs.boulders:AddRightGroupbox("Farm Batu", "bot")
-		FarmBox:AddLabel("Dikhususkan untuk farming rune & kristal mutasi", true)
+		local FarmBox = Tabs.boulders:AddRightGroupbox("Boulder Farm", "bot")
+		FarmBox:AddLabel("Specialized in rune farming", true)
 		FarmBox:AddDivider()
 
 		FarmBox:AddDropdown("FarmTargets", {
-			Text = "Target",
+			Text = "Targets",
 			Values = FARM_KINDS,
 			Multi = true,
 			AllowNull = true,
@@ -4998,17 +4885,8 @@ do
 			Callback = setActive,
 		})
 
-		FarmBox:AddToggle("AutoGrabMutations", {
-			Text = "Auto Ambil Kristal Mutasi",
-			Default = Config.AutoGrabMutations,
-			Callback = function(value)
-				autoGrabMutations = value
-				State.autoGrabMutations = value
-			end,
-		})
-
 		FarmBox:AddToggle("AutoRejoinBoulders", {
-			Text = "Auto Rejoin Saat Selesai",
+			Text = "Auto Rejoin On Finish",
 			Default = Config.AutoRejoinBoulders,
 			Callback = function(value)
 				autoRejoin = value
@@ -5017,7 +4895,7 @@ do
 
 		FarmBox:AddDivider()
 
-		local StatusLabel = FarmBox:AddLabel("Diam", true)
+		local StatusLabel = FarmBox:AddLabel("Idle", true)
 		local labelClock = 0
 
 		Connections.farmConn = Services.RunService.Heartbeat:Connect(function(deltaTime)
@@ -5053,6 +4931,7 @@ do
 			CFrame.new(74.3923645, 610.789368, 210.838226, -0.94896102, -0.27110818, 0.161162555, 2.26557495e-06, 0.51098305, 0.859590769, -0.315393418, 0.815718472, -0.484902382),
 		}
 
+		local SCAN_HOLD = 1.4
 		local PEAK_GAP = 8
 		local PEAK_STEP = 48
 		local PEAK_RINGS = 12
@@ -5063,16 +4942,19 @@ do
 		local ZONE_PAD = 12
 		local SURFACE_GAP = 0.15
 		local COLUMN_DRY = 25
+		local DIG_BURST = 7
 		local DIG_SINK = 1.2
 		local DIG_LIFT = 6
 		local EQUIP_STEP = 0.5
 		local SELL_MARK = Config.AutoSellThreshold
+		local SELL_WAIT = 7
 		local DIG_REACH = 12
 		local DIG_REFRESH = 5
 		local COLLECT_RANGE = 32000
 		local COLLECT_LIFT = 5
 		local COLLECT_GAP = 0.15
 		local GRAB_GAP = 0.05
+		local MAX_LOOT_TIME = 4.0
 
 		local OFFSETS = { Vector2.new(0, 0) }
 		local PEAK_OFFSETS = { Vector2.new(0, 0) }
@@ -5198,7 +5080,30 @@ do
 		local plantPlotPos
 		local plantGroundPos
 		local lootBlocked = false
-		local statusText = "Diam"
+		local statusText = "Idle"
+
+		local function toggleValue(name)
+			local store = Library and Library.Toggles
+			local entry = store and store[name]
+			if entry and type(entry.Value) == "boolean" then
+				return entry.Value
+			end
+			return false
+		end
+
+		local function getSellCFrame()
+			local things = Services.Workspace:FindFirstChild("Things")
+			local prox = things and things:FindFirstChild("SellProx")
+			if prox and prox:IsA("BasePart") then
+				return CFrame.new(prox.Position + Vector3.new(0, 3, 0), prox.Position)
+			end
+			local model = things and things:FindFirstChild("SellModel")
+			local part = model and model:FindFirstChild("SellPart")
+			if part and part:IsA("BasePart") then
+				return CFrame.new(part.Position + Vector3.new(0, 3, 0), part.Position)
+			end
+			return CFrame.new(-45.85, 32, 1066.58)
+		end
 
 		local function zoneBase()
 			local base = Services.Workspace:GetAttribute("MountainBaseY")
@@ -5326,7 +5231,7 @@ do
 			end
 
 			return pcall(function()
-				for step = 0, (State.miningDamageMultiplier or 6) - 1 do
+				for step = 0, DIG_BURST - 1 do
 					fireRemote(event, name, aim - Vector3.new(0, step * DIG_SINK, 0))
 				end
 			end)
@@ -5395,6 +5300,8 @@ do
 			scan(LocalPlayer.Character)
 			return list
 		end
+
+		-- Replaced with plantPhase state machine in step()
 
 		local function findLoot(free, origin)
 			local now = os.clock()
@@ -5496,6 +5403,7 @@ do
 			lootHpMark = nil
 			table.clear(blacklistedLoot)
 			table.clear(blacklistedColumns)
+			table.clear(blacklistedColumns)
 			sellPhase = "idle"
 			sellReturnCFrame = nil
 			sellPhaseClock = 0
@@ -5503,7 +5411,7 @@ do
 			plantPhaseClock = 0
 			plantReturnCFrame = nil
 			heldPick = nil
-			statusText = "Diam"
+			statusText = "Idle"
 
 			Move.setFly(toggleValue("Fly"))
 			Move.setNoclip(toggleValue("Noclip"))
@@ -5519,7 +5427,7 @@ do
 		local function step(deltaTime)
 			local root = getRoot()
 			if not root then
-				statusText = "Menunggu karakter"
+				statusText = "Waiting for character"
 				return
 			end
 
@@ -5527,7 +5435,7 @@ do
 
 			if plantPhase ~= "idle" then
 				if plantPhase == "travel" then
-					statusText = "Pindah ke plot..."
+					statusText = "Traveling to plot..."
 					holdAt(plantPlotPos)
 					if (root.Position - plantPlotPos.Position).Magnitude < 10 or (now - plantPhaseClock > 12) then
 						plantPhase = "do_plant"
@@ -5537,7 +5445,7 @@ do
 				end
 
 				if plantPhase == "do_plant" then
-					statusText = "Menanam kristal..."
+					statusText = "Planting luck crystals..."
 					holdAt(plantPlotPos)
 					if now - plantPhaseClock >= 0.15 then
 						plantPhaseClock = now
@@ -5559,7 +5467,7 @@ do
 				end
 
 				if plantPhase == "return" then
-					statusText = "Kembali ke gunung..."
+					statusText = "Returning to mountain..."
 					local destination = plantReturnCFrame or mountainSpot()
 					holdAt(destination)
 					if (root.Position - destination.Position).Magnitude < 12 or (now - plantPhaseClock > 12) then
@@ -5586,7 +5494,7 @@ do
 						plantIndex = 1
 						plantPhase = "travel"
 						plantPhaseClock = now
-						statusText = "Pindah ke plot..."
+						statusText = "Heading to plot..."
 						return
 					end
 				end
@@ -5600,7 +5508,7 @@ do
 
 				if scanIndex <= #SCAN_SPOTS then
 					holdAt(SCAN_SPOTS[scanIndex])
-					statusText = string.format("Memuat dataran %d/%d", scanIndex, #SCAN_SPOTS)
+					statusText = string.format("Loading terrain %d/%d", scanIndex, #SCAN_SPOTS)
 
 					if now >= scanUntil then
 						scanIndex += 1
@@ -5618,7 +5526,7 @@ do
 				local sellCFrame = getSellCFrame()
 
 				if sellPhase == "travel" then
-					statusText = "Pindah ke tempat jual..."
+					statusText = "Traveling to sell station..."
 					holdAt(sellCFrame)
 
 					if (root.Position - sellCFrame.Position).Magnitude < 10 or (now - sellPhaseClock > 12) then
@@ -5629,7 +5537,7 @@ do
 				end
 
 				if sellPhase == "do_sell" then
-					statusText = "Menjual kristal..."
+					statusText = "Selling crystals..."
 					holdAt(sellCFrame)
 
 					if now - sellPhaseClock >= 0.3 and now - sellPhaseClock < 0.6 then
@@ -5653,7 +5561,7 @@ do
 				end
 
 				if sellPhase == "return" then
-					statusText = "Kembali ke gunung..."
+					statusText = "Returning to mountain..."
 					local destination = sellReturnCFrame or mountainSpot()
 					holdAt(destination)
 
@@ -5672,7 +5580,7 @@ do
 				sellReturnCFrame = root.CFrame
 				sellPhase = "travel"
 				sellPhaseClock = now
-				statusText = "Pindah ke tempat jual..."
+				statusText = "Heading to sell station..."
 				return
 			end
 
@@ -5697,7 +5605,7 @@ do
 			end
 
 			if not heldPick then
-				statusText = "Membekali pickaxe..."
+				statusText = "Equipping pickaxe..."
 				return
 			end
 
@@ -5773,9 +5681,9 @@ do
 					if lootMax and lootMax > 0 then
 						ratio = math.clamp(1 - lootHp / lootMax, 0, 1)
 					end
-					statusText = string.format("Menambang %s (%s) %d%%", crystalName(loot), formatShort(crystalValue(loot), "$"), math.floor(ratio * 100))
+					statusText = string.format("Mining %s (%s) %d%%", crystalName(loot), formatShort(crystalValue(loot), "$"), math.floor(ratio * 100))
 				else
-					statusText = string.format("Mengumpulkan %s (%s)...", crystalName(loot), formatShort(crystalValue(loot), "$"))
+					statusText = string.format("Collecting %s (%s)...", crystalName(loot), formatShort(crystalValue(loot), "$"))
 				end
 
 				return
@@ -5824,7 +5732,7 @@ do
 						swingClock -= swingNeed
 						swing(root.Position - Vector3.new(0, DIG_REACH * 0.5, 0))
 					end
-					statusText = "Memuat dataran"
+					statusText = "Loading terrain"
 					return
 				end
 
@@ -5843,7 +5751,7 @@ do
 				swing(target)
 			end
 
-			statusText = string.format("Menambang permukaan di %dm", math.floor(target.Y))
+			statusText = string.format("Mining surface at %dm", math.floor(target.Y))
 		end
 
 		local function setActive(value)
@@ -5875,15 +5783,15 @@ do
 			sellSpot = nil
 			sellUntil = 0
 			heldPick = nil
-			statusText = "Memulai"
+			statusText = "Starting"
 
 			Move.setFly(false)
 			Move.setNoclip(true)
 			Mountain.setAutoGrab(true)
 		end
 
-		local MoneyBox = Tabs.farming:AddRightGroupbox("Auto Farm Kristal", "gem")
-		MoneyBox:AddLabel("Memuat gunung dan menambang kristal berdasarkan nilai uang atau poin keberuntungan", true)
+		local MoneyBox = Tabs.farming:AddRightGroupbox("Auto Farm Crystal", "gem")
+		MoneyBox:AddLabel("Loads the mountain and digs crystals by cash value or luck points", true)
 		MoneyBox:AddDivider()
 
 		MoneyBox:AddToggle("AutoFarmMoney", {
@@ -5893,7 +5801,7 @@ do
 		})
 
 		MoneyBox:AddToggle("FocusLuckCrystals", {
-			Text = "Fokus Kristal Keberuntungan",
+			Text = "Focus Luck Crystals",
 			Default = false,
 			Callback = function(value)
 				focusLuck = value
@@ -5902,7 +5810,7 @@ do
 		})
 
 		MoneyBox:AddSlider("MinLuckFilterPoints", {
-			Text = "Min Poin Keberuntungan",
+			Text = "Min Luck Points",
 			Default = 10,
 			Min = 1,
 			Max = 1000,
@@ -5918,7 +5826,7 @@ do
 		MoneyBox:AddDivider()
 
 		MoneyBox:AddToggle("AutoPlantLuckCrystals", {
-			Text = "Auto Tanam Kristal Keberuntungan di Plot",
+			Text = "Auto Plant Luck Crystals On Plot",
 			Default = false,
 			Callback = function(value)
 				autoPlantLuck = value
@@ -5926,7 +5834,7 @@ do
 		})
 
 		MoneyBox:AddToggle("MoneyAutoSell", {
-			Text = "Auto Jual Saat 50%",
+			Text = "Auto Sell At 50%",
 			Default = false,
 			Callback = function(value)
 				autoSell = value
@@ -5935,7 +5843,7 @@ do
 
 		MoneyBox:AddDivider()
 
-		local StatusLabel = MoneyBox:AddLabel("Diam", true)
+		local StatusLabel = MoneyBox:AddLabel("Idle", true)
 		local labelClock = 0
 
 		Connections.moneyConn = Services.RunService.Heartbeat:Connect(function(deltaTime)
@@ -6008,12 +5916,12 @@ do
 			end
 		end)
 
-		local BombBox = Tabs.farming:AddLeftGroupbox("Auto Beli Bom", "bomb")
-		BombBox:AddLabel("Membeli semua bom dari toko saat stok tersedia", true)
+		local BombBox = Tabs.farming:AddLeftGroupbox("Bomb Auto Buy", "bomb")
+		BombBox:AddLabel("Buys all bombs from shop whenever stock is available", true)
 		BombBox:AddDivider()
 
 		BombBox:AddToggle("AutoBuyBombs", {
-			Text = "Auto Beli Saat Restock",
+			Text = "Auto Buy On Restock",
 			Default = Config.AutoBuyBombs,
 			Callback = function(value)
 				State.autoBuyBombs = value
@@ -6023,11 +5931,11 @@ do
 			end,
 		})
 
-		BombBox:AddButton("Beli Semua Stok Sekarang", function()
+		BombBox:AddButton("Buy All Stock Now", function()
 			task.spawn(function()
 				local count = buyAllAvailableBombs()
 				if Library then
-					Library:Notify(string.format("Berhasil membeli %d bom dari toko!", count), 3)
+					Library:Notify(string.format("Purchased %d bombs from shop!", count), 3)
 				end
 			end)
 		end)
@@ -6047,27 +5955,27 @@ ThemeManager:SetFolder("Universe")
 
 do
 	local function install()
-		local ConfigGroupbox = SettingsTab:AddLeftGroupbox("Konfigurasi", "folder-cog")
+		local ConfigGroupbox = SettingsTab:AddLeftGroupbox("Configuration", "folder-cog")
 
 		ConfigGroupbox:AddInput("SaveManager_ConfigName", {
-			Text = "Nama Konfigurasi",
-			Placeholder = "Konfigurasi Saya",
+			Text = "Config name",
+			Placeholder = "My Config",
 		})
 
-		ConfigGroupbox:AddButton("Buat konfigurasi", function()
+		ConfigGroupbox:AddButton("Create config", function()
 			local name = Library.Options.SaveManager_ConfigName.Value
 			if name:gsub(" ", "") == "" then
-				Library:Notify("Nama konfigurasi tidak valid (kosong)", 2)
+				Library:Notify("Invalid config name (empty)", 2)
 				return
 			end
 
 			local success, err = SaveManager:Save(name)
 			if not success then
-				Library:Notify("Gagal membuat konfigurasi: " .. err)
+				Library:Notify("Failed to create config: " .. err)
 				return
 			end
 
-			Library:Notify(string.format("Konfigurasi %q dibuat", name))
+			Library:Notify(string.format("Created config %q", name))
 			Library.Options.SaveManager_ConfigList:SetValues(SaveManager:RefreshConfigList())
 			Library.Options.SaveManager_ConfigList:SetValue(nil)
 		end)
@@ -6075,83 +5983,83 @@ do
 		ConfigGroupbox:AddDivider()
 
 		ConfigGroupbox:AddDropdown("SaveManager_ConfigList", {
-			Text = "Daftar Konfigurasi",
+			Text = "Config list",
 			Values = SaveManager:RefreshConfigList(),
 			AllowNull = true,
 		})
 
-		ConfigGroupbox:AddButton("Muat konfigurasi", function()
+		ConfigGroupbox:AddButton("Load config", function()
 			local name = Library.Options.SaveManager_ConfigList.Value
 			local success, err = SaveManager:Load(name)
 			if not success then
-				Library:Notify("Gagal memuat konfigurasi: " .. err)
+				Library:Notify("Failed to load config: " .. err)
 				return
 			end
-			Library:Notify(string.format("Konfigurasi %q dimuat", name))
+			Library:Notify(string.format("Loaded config %q", name))
 		end)
 
-		ConfigGroupbox:AddButton("Timpa konfigurasi", function()
+		ConfigGroupbox:AddButton("Overwrite config", function()
 			local name = Library.Options.SaveManager_ConfigList.Value
 			local success, err = SaveManager:Save(name)
 			if not success then
-				Library:Notify("Gagal menimpa konfigurasi: " .. err)
+				Library:Notify("Failed to overwrite config: " .. err)
 				return
 			end
-			Library:Notify(string.format("Konfigurasi %q ditimpa", name))
+			Library:Notify(string.format("Overwrote config %q", name))
 		end)
 
-		ConfigGroupbox:AddButton("Hapus konfigurasi", function()
+		ConfigGroupbox:AddButton("Delete config", function()
 			local name = Library.Options.SaveManager_ConfigList.Value
 			local success, err = SaveManager:Delete(name)
 			if not success then
-				Library:Notify("Gagal menghapus konfigurasi: " .. err)
+				Library:Notify("Failed to delete config: " .. err)
 				return
 			end
 
-			Library:Notify(string.format("Konfigurasi %q dihapus", name))
+			Library:Notify(string.format("Deleted config %q", name))
 			Library.Options.SaveManager_ConfigList:SetValues(SaveManager:RefreshConfigList())
 			Library.Options.SaveManager_ConfigList:SetValue(nil)
 		end)
 
-		ConfigGroupbox:AddButton("Segarkan daftar", function()
+		ConfigGroupbox:AddButton("Refresh list", function()
 			Library.Options.SaveManager_ConfigList:SetValues(SaveManager:RefreshConfigList())
 			Library.Options.SaveManager_ConfigList:SetValue(nil)
 		end)
 
-		local AutoloadLabel = ConfigGroupbox:AddLabel("Konfigurasi autoload saat ini: " .. SaveManager:GetAutoloadConfig(), true)
+		local AutoloadLabel = ConfigGroupbox:AddLabel("Current autoload config: " .. SaveManager:GetAutoloadConfig(), true)
 
-		ConfigGroupbox:AddButton("Jadikan autoload", function()
+		ConfigGroupbox:AddButton("Set as autoload", function()
 			local name = Library.Options.SaveManager_ConfigList.Value
 			local success, err = SaveManager:SaveAutoloadConfig(name)
 			if not success then
-				Library:Notify("Gagal menyetel konfigurasi autoload: " .. err)
+				Library:Notify("Failed to set autoload config: " .. err)
 				return
 			end
 
-			Library:Notify(string.format("%q disetel untuk auto load", name))
-			AutoloadLabel:SetText("Konfigurasi autoload saat ini: " .. name)
+			Library:Notify(string.format("Set %q to auto load", name))
+			AutoloadLabel:SetText("Current autoload config: " .. name)
 		end)
 
 		ConfigGroupbox:AddButton("Reset autoload", function()
 			local success, err = SaveManager:DeleteAutoLoadConfig()
 			if not success then
-				Library:Notify("Gagal mereset konfigurasi autoload: " .. err)
+				Library:Notify("Failed to reset autoload config: " .. err)
 				return
 			end
 
-			Library:Notify("Autoload dinonaktifkan")
-			AutoloadLabel:SetText("Konfigurasi autoload saat ini: tidak ada")
+			Library:Notify("Set autoload to none")
+			AutoloadLabel:SetText("Current autoload config: none")
 		end)
 
 		local MenuGroup = SettingsTab:AddRightGroupbox("Menu", "wrench")
 
-		MenuGroup:AddLabel("Tombol menu"):AddKeyPicker("MenuKeybind", {
+		MenuGroup:AddLabel("Menu bind"):AddKeyPicker("MenuKeybind", {
 			Default = Config.KeybindMenu,
 			NoUI = true,
-			Text = "Tombol Menu",
+			Text = "Menu keybind",
 		})
 
-		MenuGroup:AddButton("Tutup Script", function()
+		MenuGroup:AddButton("Unload", function()
 			Library:Unload()
 		end)
 	end
@@ -6240,4 +6148,6 @@ end
 
 getgenv().UniverseUnload = cleanupAll
 Library:OnUnload(cleanupAll)
-```
+
+
+tolong ubah ke bahasa indonesia fiturnya, sama saya ingin luck/keberuntungan di perlihat dengan jelas agak besar size nya sama saat menggetok/memukul builder Rimeveil dan nocturnite di putar batunya agar kristal tidak hilang dari batu karena cuma kelihatan sebelah batunya agar batu kelihatan jelas
