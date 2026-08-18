@@ -87,6 +87,7 @@ local State = {
 	antiBurnActive = false,
 	antiBurnClock = 0,
 	miningDamageMultiplier = 6,
+	swingSpeedMultiplier = 2,
 }
 
 local Storage = {
@@ -343,12 +344,23 @@ local function formatDistance(studs)
 	return string.format("%dm", math.floor(studs+0.5))
 end
 
+local function addThousandSep(n)
+	local s = tostring(math.floor(n))
+	local pos = #s % 3
+	if pos == 0 then pos = 3 end
+	local parts = { s:sub(1, pos) }
+	for i = pos + 1, #s, 3 do
+		parts[#parts + 1] = s:sub(i, i + 2)
+	end
+	return table.concat(parts, ",")
+end
+
 local function formatLuck(score)
 	local pct = (tonumber(score) or 0) * 100
 	if pct <= 0 then return "+0%" end
 	if pct < 1  then return string.format("+%.2f%%", pct) end
 	if pct < 10 then return string.format("+%.1f%%", pct) end
-	return string.format("+%.0f%%", pct)
+	return string.format("+%s%%", addThousandSep(pct))
 end
 
 local function parseValue(text)
@@ -479,7 +491,9 @@ end
 local function crystalLuck(inst)
 	local text = luckLabelText(inst)
 	if type(text)=="string" then
-		local pct = tonumber(text:match("([%d%.]+)%s*%%"))
+		-- Strip thousand separators (commas) so "5,241%" parses as 5241
+		local cleaned = text:gsub(",", "")
+		local pct = tonumber(cleaned:match("([%d%.]+)%s*%%"))
 		if pct and pct>0 then return pct/100 end
 	end
 	return computeLuck(inst)
@@ -2454,6 +2468,13 @@ do
 		})
 		PickupBox:AddLabel("Catatan: Nilai ekstrem (>500) bisa menyebabkan lag/DC!", true)
 
+		PickupBox:AddSlider("SwingSpeedMultiplier", {
+			Text = "Pengali Kecepatan Pukulan",
+			Default = 2, Min = 1, Max = 10, Rounding = 1,
+			Callback = function(value) State.swingSpeedMultiplier = value end,
+		})
+		PickupBox:AddLabel("Makin tinggi = pukulan makin cepat (2-5 aman)", true)
+
 		PickupBox:AddDivider()
 		BackpackLabel = PickupBox:AddLabel("Tas 0.0 / 0.0 kg", true)
 	end
@@ -2699,7 +2720,7 @@ do
 		local PLACE_ID      = game.PlaceId
 		local SCAN_HOLD     = 1.4
 		local SWING_GAP     = 0.04
-		local SWING_FLOOR   = 0.02
+		local SWING_FLOOR   = 0.01
 		local COOLDOWN_KEYS = { "SwingCooldown","DigCooldown","Cooldown","SwingSpeed","DigSpeed" }
 		local AIM_ANGLES    = { 0,35,-35,70,-70,110,-110,145,-145,180 }
 		local AIM_LIFT      = { 0,5,-4,12 }
@@ -2950,13 +2971,16 @@ do
 
 		local function swingGapFn(tool)
 			local pick = tool or heldPick
+			local base = SWING_GAP
 			if pick then
 				for _, key in ipairs(COOLDOWN_KEYS) do
 					local value = tonumber(getAttr(pick, key))
-					if value and value>0 then return math.clamp(value, SWING_FLOOR, 0.5) end
+					if value and value>0 then base = math.clamp(value, SWING_FLOOR, 0.5); break end
 				end
 			end
-			return SWING_GAP
+			local mult = State.swingSpeedMultiplier or 1
+			if mult > 1 then base = base / mult end
+			return math.max(base, SWING_FLOOR)
 		end
 
 		local function swing(part, model, center)
@@ -3278,7 +3302,7 @@ do
 				local swung = 0
 
 				if swingClock >= gap then
-					swung = math.min(math.floor(swingClock/gap), 4)
+					swung = math.min(math.floor(swingClock/gap), 8)
 					swingClock = swingClock - swung*gap
 					for _ = 1, swung do swing(anchor, target, center) end
 				end
