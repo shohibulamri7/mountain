@@ -1,306 +1,456 @@
--- DropKristal v6 - Pilih kristal mana yang mau dikeluarin
+-- ═══════════════════════════════════════════════════════════════
+--  DROP / EJECT CRYSTAL MODULE  (standalone, paste di bawah script utama)
+--  Mengeluarkan kristal dari tas secara cepat berdasarkan filter pilihan
+-- ═══════════════════════════════════════════════════════════════
 
-local lp      = game.Players.LocalPlayer
-local CoreGui = game:GetService("CoreGui")
+do
+    -- ───────────────── Referensi dari script utama ─────────────────
+    local Players        = game:GetService("Players")
+    local RunService     = game:GetService("RunService")
+    local LocalPlayer    = Players.LocalPlayer
 
--- Hapus GUI lama
-if CoreGui:FindFirstChild("DropKristalGui") then
-    CoreGui.DropKristalGui:Destroy()
-end
-
--- ─── Cek apakah item adalah kristal ──────────────────────
-local function isKristal(item)
-    if not item or not item:IsA("Tool") then return false end
-    local nama = item.Name:lower()
-    if nama:find("crystal") or nama:find("kristal") then return true end
-    -- Cek atribut Value / Tier (biasa di game crystal)
-    local ok1, v1 = pcall(function() return item:GetAttribute("Value") end)
-    if ok1 and v1 ~= nil then return true end
-    local ok2, v2 = pcall(function() return item:GetAttribute("Tier") end)
-    if ok2 and v2 ~= nil then return true end
-    return false
-end
-
--- ─── Kumpulkan kristal ───────────────────────────────────
-local function getKristals()
-    local list = {}
-    local char = lp.Character
-    local bp   = lp:FindFirstChildOfClass("Backpack")
-    if char then
-        for _, v in ipairs(char:GetChildren()) do
-            if isKristal(v) then table.insert(list, v) end
-        end
-    end
-    if bp then
-        for _, v in ipairs(bp:GetChildren()) do
-            if isKristal(v) then table.insert(list, v) end
-        end
-    end
-    return list
-end
-
--- ─── Drop 1 kristal (metode paling simpel) ───────────────
-local function dropSatu(tool)
-    local char = lp.Character
-    if not char then return false end
-    local hum = char:FindFirstChildOfClass("Humanoid")
-    if not hum then return false end
-
-    -- Equip dulu supaya tool masuk ke karakter
-    hum:EquipTool(tool)
-    task.wait(0.15)
-
-    -- Pindahkan ke Workspace = drop
-    tool.Parent = game.Workspace
-    task.wait(0.1)
-    return true
-end
-
--- ════════════════════════════════════════════════════════
---  GUI
--- ════════════════════════════════════════════════════════
-
-local gui = Instance.new("ScreenGui")
-gui.Name         = "DropKristalGui"
-gui.ResetOnSpawn = false
-gui.Parent       = CoreGui
-
--- Frame utama (bisa di-drag)
-local main = Instance.new("Frame")
-main.Size             = UDim2.new(0, 220, 0, 300)
-main.Position         = UDim2.new(1, -235, 0.5, -150)
-main.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
-main.BorderSizePixel  = 0
-main.Parent           = gui
-
-local mc = Instance.new("UICorner")
-mc.CornerRadius = UDim.new(0, 10)
-mc.Parent = main
-
-local ms = Instance.new("UIStroke")
-ms.Color     = Color3.fromRGB(255, 80, 80)
-ms.Thickness = 2
-ms.Parent    = main
-
--- ── Title bar ────────────────────────────────────────────
-local titleBar = Instance.new("Frame")
-titleBar.Size             = UDim2.new(1, 0, 0, 30)
-titleBar.BackgroundColor3 = Color3.fromRGB(180, 30, 30)
-titleBar.BorderSizePixel  = 0
-titleBar.Parent           = main
-
-local tc = Instance.new("UICorner")
-tc.CornerRadius = UDim.new(0, 10)
-tc.Parent = titleBar
-
-local titleLbl = Instance.new("TextLabel")
-titleLbl.Size             = UDim2.new(1, -30, 1, 0)
-titleLbl.Position         = UDim2.new(0, 8, 0, 0)
-titleLbl.BackgroundTransparency = 1
-titleLbl.Text             = "💎 Drop Kristal"
-titleLbl.TextColor3       = Color3.new(1, 1, 1)
-titleLbl.TextSize         = 14
-titleLbl.Font             = Enum.Font.GothamBold
-titleLbl.TextXAlignment   = Enum.TextXAlignment.Left
-titleLbl.Parent           = titleBar
-
--- Tombol ×
-local xBtn = Instance.new("TextButton")
-xBtn.Size             = UDim2.new(0, 25, 0, 25)
-xBtn.Position         = UDim2.new(1, -27, 0, 2)
-xBtn.BackgroundColor3 = Color3.fromRGB(120, 20, 20)
-xBtn.Text             = "×"
-xBtn.TextColor3       = Color3.new(1, 1, 1)
-xBtn.TextSize         = 16
-xBtn.Font             = Enum.Font.GothamBold
-xBtn.BorderSizePixel  = 0
-xBtn.Parent           = titleBar
-
-local xc = Instance.new("UICorner")
-xc.CornerRadius = UDim.new(1, 0)
-xc.Parent = xBtn
-
-xBtn.MouseButton1Click:Connect(function() gui:Destroy() end)
-
--- Drag title bar
-local dragging, dragStart, startPos
-titleBar.InputBegan:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.MouseButton1 then
-        dragging = true
-        dragStart = input.Position
-        startPos  = main.Position
-    end
-end)
-titleBar.InputEnded:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.MouseButton1 then
-        dragging = false
-    end
-end)
-game:GetService("UserInputService").InputChanged:Connect(function(input)
-    if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
-        local delta = input.Position - dragStart
-        main.Position = UDim2.new(
-            startPos.X.Scale, startPos.X.Offset + delta.X,
-            startPos.Y.Scale, startPos.Y.Offset + delta.Y
-        )
-    end
-end)
-
--- ── Scroll list kristal ──────────────────────────────────
-local scrollFrame = Instance.new("ScrollingFrame")
-scrollFrame.Size              = UDim2.new(1, -10, 1, -80)
-scrollFrame.Position          = UDim2.new(0, 5, 0, 35)
-scrollFrame.BackgroundColor3  = Color3.fromRGB(30, 30, 35)
-scrollFrame.BorderSizePixel   = 0
-scrollFrame.ScrollBarThickness = 4
-scrollFrame.ScrollBarImageColor3 = Color3.fromRGB(255, 80, 80)
-scrollFrame.CanvasSize        = UDim2.new(0, 0, 0, 0)
-scrollFrame.Parent            = main
-
-local sc = Instance.new("UICorner")
-sc.CornerRadius = UDim.new(0, 6)
-sc.Parent = scrollFrame
-
-local listLayout = Instance.new("UIListLayout")
-listLayout.Padding     = UDim.new(0, 3)
-listLayout.SortOrder   = Enum.SortOrder.LayoutOrder
-listLayout.Parent      = scrollFrame
-
--- Status label
-local statusLbl = Instance.new("TextLabel")
-statusLbl.Size                = UDim2.new(1, -10, 0, 16)
-statusLbl.Position            = UDim2.new(0, 5, 1, -40)
-statusLbl.BackgroundTransparency = 1
-statusLbl.Text                = ""
-statusLbl.TextColor3          = Color3.fromRGB(180, 180, 180)
-statusLbl.TextSize            = 11
-statusLbl.Font                = Enum.Font.Gotham
-statusLbl.TextXAlignment      = Enum.TextXAlignment.Left
-statusLbl.Parent              = main
-
--- ── Tombol bawah: Refresh + Drop Semua ───────────────────
-local bottomFrame = Instance.new("Frame")
-bottomFrame.Size             = UDim2.new(1, -10, 0, 25)
-bottomFrame.Position         = UDim2.new(0, 5, 1, -25)
-bottomFrame.BackgroundTransparency = 1
-bottomFrame.Parent           = main
-
-local refreshBtn = Instance.new("TextButton")
-refreshBtn.Size             = UDim2.new(0.45, 0, 1, 0)
-refreshBtn.Position         = UDim2.new(0, 0, 0, 0)
-refreshBtn.BackgroundColor3 = Color3.fromRGB(50, 50, 60)
-refreshBtn.Text             = "🔄 Refresh"
-refreshBtn.TextColor3       = Color3.new(1, 1, 1)
-refreshBtn.TextSize         = 12
-refreshBtn.Font             = Enum.Font.GothamBold
-refreshBtn.AutoButtonColor  = true
-refreshBtn.BorderSizePixel  = 0
-refreshBtn.Parent           = bottomFrame
-
-local rc = Instance.new("UICorner")
-rc.CornerRadius = UDim.new(0, 5)
-rc.Parent = refreshBtn
-
-local dropAllBtn = Instance.new("TextButton")
-dropAllBtn.Size             = UDim2.new(0.52, 0, 1, 0)
-dropAllBtn.Position         = UDim2.new(0.48, 0, 0, 0)
-dropAllBtn.BackgroundColor3 = Color3.fromRGB(200, 30, 30)
-dropAllBtn.Text             = "💥 Drop Semua"
-dropAllBtn.TextColor3       = Color3.new(1, 1, 1)
-dropAllBtn.TextSize         = 12
-dropAllBtn.Font             = Enum.Font.GothamBold
-dropAllBtn.AutoButtonColor  = true
-dropAllBtn.BorderSizePixel  = 0
-dropAllBtn.Parent           = bottomFrame
-
-local dac = Instance.new("UICorner")
-dac.CornerRadius = UDim.new(0, 5)
-dac.Parent = dropAllBtn
-
--- ─── Render list kristal ─────────────────────────────────
-local function refreshList()
-    -- Hapus item lama
-    for _, child in ipairs(scrollFrame:GetChildren()) do
-        if child:IsA("TextButton") then child:Destroy() end
+    -- Helper getAttr aman
+    local function safeAttr(inst, name)
+        if not inst then return nil end
+        local ok, v = pcall(inst.GetAttribute, inst, name)
+        return ok and v or nil
     end
 
-    local kristals = getKristals()
-
-    if #kristals == 0 then
-        statusLbl.Text = "Tidak ada kristal di tas."
-        scrollFrame.CanvasSize = UDim2.new(0, 0, 0, 0)
-        return
+    -- Ambil nilai numerik kristal
+    local function crVal(tool)    return tonumber(safeAttr(tool,"Value"))    or 0  end
+    local function crTier(tool)   return tonumber(safeAttr(tool,"Tier"))     or 0  end
+    local function crWeight(tool) return tonumber(safeAttr(tool,"WeightKg")) or 0  end
+    local function crName(tool)
+        local n = safeAttr(tool,"CrystalName")
+        return (type(n)=="string" and n~="") and n or (tool and tool.Name) or "?"
+    end
+    local function crMutation(tool)
+        local m = safeAttr(tool,"Mutation")
+        return (type(m)=="string" and m~="" and m~="None") and m or nil
+    end
+    local function crRarity(tool)
+        local n = safeAttr(tool,"TierName")
+        return (type(n)=="string" and n~="") and n or "Common"
     end
 
-    statusLbl.Text = #kristals .. " kristal ditemukan"
+    -- Singkat nilai uang
+    local SFX = {"","k","M","B","T","Qa"}
+    local function fmtShort(n)
+        n = tonumber(n) or 0
+        local sign = n<0 and "-" or ""; n=math.abs(n)
+        if n<1000 then return sign..math.floor(n+0.5) end
+        local i=0
+        while n>=1000 and i<#SFX-1 do n=n/1000; i=i+1 end
+        return string.format("%s%.2f%s", sign, n, SFX[i+1])
+    end
 
-    for i, kr in ipairs(kristals) do
-        local itemBtn = Instance.new("TextButton")
-        itemBtn.Size             = UDim2.new(1, -6, 0, 30)
-        itemBtn.BackgroundColor3 = Color3.fromRGB(45, 45, 55)
-        itemBtn.Text             = "  💎 " .. kr.Name
-        itemBtn.TextColor3       = Color3.new(1, 1, 1)
-        itemBtn.TextSize         = 13
-        itemBtn.Font             = Enum.Font.Gotham
-        itemBtn.TextXAlignment   = Enum.TextXAlignment.Left
-        itemBtn.AutoButtonColor  = true
-        itemBtn.BorderSizePixel  = 0
-        itemBtn.LayoutOrder      = i
-        itemBtn.Parent           = scrollFrame
+    -- Parse "2m" -> 2000000
+    local PMUL = {k=1e3,m=1e6,b=1e9,t=1e12,qa=1e15}
+    local function parseVal(text)
+        if type(text)~="string" then return nil end
+        local s = text:lower():gsub("[%s,%$_]","")
+        local num, suf = s:match("^(%d*%.?%d+)(%a*)$")
+        if not num then return nil end
+        local base = tonumber(num); if not base then return nil end
+        if suf=="" then return base end
+        return base*(PMUL[suf] or 1)
+    end
 
-        local ic = Instance.new("UICorner")
-        ic.CornerRadius = UDim.new(0, 5)
-        ic.Parent = itemBtn
-
-        itemBtn.MouseButton1Click:Connect(function()
-            itemBtn.BackgroundColor3 = Color3.fromRGB(80, 180, 80)
-            itemBtn.Text = "  ✅ Dropping..."
-
-            local ok = dropSatu(kr)
-
-            if ok then
-                statusLbl.Text = kr.Name .. " di-drop!"
-            else
-                statusLbl.Text = "Gagal drop " .. kr.Name
+    -- ───────────────── Scan kristal di inventory ─────────────────
+    local function scanInventory()
+        local list = {}
+        local function push(container)
+            if not container then return end
+            for _, tool in ipairs(container:GetChildren()) do
+                if tool:IsA("Tool") and safeAttr(tool,"Tier")~=nil then
+                    list[#list+1] = tool
+                end
             end
+        end
+        push(LocalPlayer:FindFirstChildOfClass("Backpack"))
+        push(LocalPlayer.Character)
+        return list
+    end
 
-            task.wait(0.3)
-            itemBtn:Destroy()
+    -- ───────────────── Drop satu tool ─────────────────
+    --  Metode 1: Remote "DropCrystal" jika tersedia di game
+    --  Metode 2: Unequip + pindah ke Workspace (exploit standard)
+    local DropRemote = (function()
+        local rs = game:GetService("ReplicatedStorage")
+        local folder = rs:FindFirstChild("Remotes") or rs:FindFirstChild("RemoteEvents")
+        if not folder then return nil end
+        for _, name in ipairs({"DropCrystal","DropItem","DropTool","ThrowCrystal"}) do
+            local r = folder:FindFirstChild(name)
+            if r then return r end
+        end
+        return nil
+    end)()
 
-            -- Update canvas & count
-            local sisa = getKristals()
-            statusLbl.Text = #sisa .. " kristal tersisa"
-            scrollFrame.CanvasSize = UDim2.new(0, 0, 0, #sisa * 33)
+    local function dropTool(tool)
+        if not tool or not tool.Parent then return false end
+
+        -- Coba remote resmi dulu
+        if DropRemote then
+            local ok = pcall(function()
+                if DropRemote:IsA("RemoteEvent") then
+                    DropRemote:FireServer(tool)
+                elseif DropRemote:IsA("RemoteFunction") then
+                    DropRemote:InvokeServer(tool)
+                end
+            end)
+            if ok then return true end
+        end
+
+        -- Unequip jika sedang dipegang karakter
+        local character = LocalPlayer.Character
+        local humanoid  = character and character:FindFirstChildOfClass("Humanoid")
+        if humanoid and tool:IsDescendantOf(character) then
+            pcall(function() humanoid:UnequipTools() end)
+            task.wait(0.02)
+        end
+
+        -- Pindahkan ke Workspace supaya "jatuh" (exploit drop)
+        local root = character and character:FindFirstChild("HumanoidRootPart")
+        local pos  = root and root.Position or Vector3.new(0, 5, 0)
+        local ok1  = pcall(function()
+            tool.Parent = game:GetService("Workspace")
+            local handle = tool:FindFirstChildWhichIsA("BasePart")
+            if handle then
+                handle.CFrame = CFrame.new(pos + Vector3.new(
+                    math.random(-3,3), 1, math.random(-3,3)
+                ))
+                handle.AssemblyLinearVelocity = Vector3.new(
+                    math.random(-4,4), math.random(3,6), math.random(-4,4)
+                )
+            end
+        end)
+        return ok1
+    end
+
+    -- ───────────────── State modul ─────────────────
+    local DropState = {
+        active       = false,
+        minValue     = 0,
+        maxValue     = 500000,   -- default 500k
+        tierMin      = 0,
+        tierMax      = 6,
+        mutOnly      = false,
+        excludeMut   = true,     -- lindungi mutasi by default
+        dropDelay    = 0.05,
+        previewList  = {},
+        loopActive   = false,
+        droppedTotal = 0,
+        statusText   = "Diam",
+    }
+
+    -- ───────────────── Filter ─────────────────
+    local function passesFilter(tool)
+        local val  = crVal(tool)
+        local tier = crTier(tool)
+        local mut  = crMutation(tool)
+        if val  < DropState.minValue  then return false end
+        if val  > DropState.maxValue  then return false end
+        if tier < DropState.tierMin   then return false end
+        if tier > DropState.tierMax   then return false end
+        if DropState.mutOnly    and not mut then return false end
+        if DropState.excludeMut and     mut then return false end
+        return true
+    end
+
+    local function buildDropList()
+        local all  = scanInventory()
+        local list = {}
+        for _, tool in ipairs(all) do
+            if passesFilter(tool) then list[#list+1] = tool end
+        end
+        -- Nilai terkecil dulu
+        table.sort(list, function(a,b) return crVal(a) < crVal(b) end)
+        return list
+    end
+
+    -- ───────────────── Eksekusi drop ─────────────────
+    local function doDropAll(list, onDone)
+        if #list == 0 then
+            DropState.statusText = "Tidak ada kristal yang memenuhi filter"
+            if onDone then onDone(0) end
+            return
+        end
+        task.spawn(function()
+            local count = 0
+            for _, tool in ipairs(list) do
+                if not DropState.active and not DropState.loopActive then break end
+                if tool and tool.Parent then
+                    if dropTool(tool) then
+                        count = count + 1
+                        DropState.droppedTotal = DropState.droppedTotal + 1
+                        DropState.statusText = string.format(
+                            "Membuang %d/%d – %s (%s)",
+                            count, #list, crName(tool), fmtShort(crVal(tool))
+                        )
+                    end
+                    task.wait(DropState.dropDelay)
+                end
+            end
+            DropState.statusText = string.format(
+                "Selesai! %d kristal dibuang (total: %d)",
+                count, DropState.droppedTotal
+            )
+            if onDone then onDone(count) end
         end)
     end
 
-    scrollFrame.CanvasSize = UDim2.new(0, 0, 0, #kristals * 33)
-end
-
--- ── Event tombol ─────────────────────────────────────────
-refreshBtn.MouseButton1Click:Connect(refreshList)
-
-dropAllBtn.MouseButton1Click:Connect(function()
-    local kristals = getKristals()
-    if #kristals == 0 then
-        statusLbl.Text = "Tidak ada kristal!"
+    -- ───────────────── UI ─────────────────
+    local lib = Library
+    if not lib then
+        warn("[DropModule] Library tidak ditemukan – jalankan setelah script utama!")
         return
     end
 
-    dropAllBtn.Text = "⏳ Dropping..."
+    -- Gunakan tab Farming yang sudah ada, atau buat tab baru
+    local dropTab = (Tabs and Tabs.farming) or Window:AddTab("Buang Kristal", "trash-2")
 
-    for i, kr in ipairs(kristals) do
-        statusLbl.Text = "Drop " .. i .. "/" .. #kristals .. " - " .. kr.Name
-        dropSatu(kr)
-        task.wait(0.2)
+    -- ── Groupbox Filter & Eksekusi ──
+    local DropBox = dropTab:AddLeftGroupbox("Buang Kristal dari Tas", "trash-2")
+
+    DropBox:AddLabel("Filter menentukan kristal mana yang akan DIBUANG", true)
+    DropBox:AddDivider()
+
+    DropBox:AddInput("DropMinValue", {
+        Text = "Nilai Minimum untuk Dibuang",
+        Default = "0",
+        Placeholder = "mis: 0  (kosong = 0)",
+        Numeric = false, Finished = false,
+        Callback = function(text)
+            local v = parseVal(text)
+            DropState.minValue = v or 0
+        end,
+    })
+
+    DropBox:AddInput("DropMaxValue", {
+        Text = "Nilai Maksimum untuk Dibuang",
+        Default = "500k",
+        Placeholder = "mis: 500k, 2m, 1.5b",
+        Numeric = false, Finished = false,
+        Callback = function(text)
+            local v = parseVal(text)
+            DropState.maxValue = v or math.huge
+        end,
+    })
+
+    DropBox:AddDivider()
+
+    DropBox:AddSlider("DropTierMin", {
+        Text = "Tier Minimum",
+        Default = 0, Min = 0, Max = 6, Rounding = 0,
+        Callback = function(v) DropState.tierMin = v end,
+    })
+    DropBox:AddSlider("DropTierMax", {
+        Text = "Tier Maksimum",
+        Default = 6, Min = 0, Max = 6, Rounding = 0,
+        Callback = function(v) DropState.tierMax = v end,
+    })
+
+    DropBox:AddDivider()
+
+    DropBox:AddToggle("DropExcludeMut", {
+        Text    = "Lindungi Kristal Bermutasi (tidak dibuang)",
+        Default = true,
+        Callback = function(v)
+            DropState.excludeMut = v
+            if v then DropState.mutOnly = false end
+        end,
+    })
+    DropBox:AddToggle("DropMutOnly", {
+        Text    = "Hanya Buang Kristal Bermutasi",
+        Default = false,
+        Callback = function(v)
+            DropState.mutOnly = v
+            if v then DropState.excludeMut = false end
+        end,
+    })
+
+    DropBox:AddDivider()
+
+    DropBox:AddSlider("DropSpeed", {
+        Text     = "Kecepatan Buang (ms per kristal)",
+        Default  = 5,
+        Min      = 1,
+        Max      = 100,
+        Rounding = 0,
+        Suffix   = "0ms",
+        Callback = function(v) DropState.dropDelay = v / 100 end,
+    })
+
+    DropBox:AddDivider()
+
+    -- Preview
+    local PreviewLabel = DropBox:AddLabel("Preview: tekan tombol di bawah", true)
+
+    DropBox:AddButton("Pratinjau (Lihat Daftar yang Akan Dibuang)", function()
+        local list = buildDropList()
+        if #list == 0 then
+            PreviewLabel:SetText("Preview: tidak ada kristal yang memenuhi filter")
+            Library:Notify("Tidak ada kristal yang memenuhi filter!", 3)
+            return
+        end
+        local totalVal = 0
+        for _, tool in ipairs(list) do totalVal = totalVal + crVal(tool) end
+        local summary = string.format(
+            "Preview: %d kristal | $%s total",
+            #list, fmtShort(totalVal)
+        )
+        PreviewLabel:SetText(summary)
+        Library:Notify(summary, 4)
+        DropState.previewList = list
+    end)
+
+    DropBox:AddButton("Buang Hasil Pratinjau", function()
+        local list = DropState.previewList
+        if not list or #list == 0 then
+            Library:Notify("Lakukan Pratinjau dulu!", 2)
+            return
+        end
+        DropState.active = true
+        doDropAll(list, function(count)
+            DropState.active = false
+            DropState.previewList = {}
+            Library:Notify(string.format("Selesai! %d kristal dibuang", count), 3)
+        end)
+    end)
+
+    DropBox:AddButton("BUANG KRISTAL SEKARANG", function()
+        local list = buildDropList()
+        if #list == 0 then
+            Library:Notify("Tidak ada kristal yang memenuhi filter!", 3)
+            return
+        end
+        Library:Notify(string.format("Membuang %d kristal...", #list), 2)
+        DropState.active = true
+        doDropAll(list, function(count)
+            DropState.active = false
+            Library:Notify(string.format("Selesai! %d kristal dibuang", count), 3)
+        end)
+    end)
+
+    -- ── Groupbox Auto & Preset ──
+    local AutoDropBox = dropTab:AddRightGroupbox("Auto Buang & Preset Cepat", "refresh-cw")
+
+    AutoDropBox:AddLabel("Auto buang otomatis berulang tiap interval tertentu", true)
+    AutoDropBox:AddDivider()
+
+    local loopInterval = 3.0
+    AutoDropBox:AddSlider("AutoDropInterval", {
+        Text     = "Interval Auto Buang (detik)",
+        Default  = 30,
+        Min      = 5,
+        Max      = 600,
+        Rounding = 0,
+        Suffix   = "0ms",
+        Callback = function(v) loopInterval = v / 10 end,
+    })
+
+    local AutoStatusLabel = AutoDropBox:AddLabel("Auto Buang: nonaktif", true)
+    local TotalLabel      = AutoDropBox:AddLabel("Total dibuang sesi ini: 0", true)
+
+    local loopDropping = false
+    AutoDropBox:AddToggle("AutoDropLoop", {
+        Text    = "Auto Buang Loop",
+        Default = false,
+        Callback = function(v)
+            DropState.loopActive = v
+            if not v then
+                loopDropping = false
+                AutoStatusLabel:SetText("Auto Buang: nonaktif")
+            end
+        end,
+    })
+
+    AutoDropBox:AddDivider()
+    AutoDropBox:AddLabel("─── Preset Satu-Klik ───", true)
+
+    -- Preset helper
+    local function runPreset(minV, maxV, protectMut)
+        local saved = {
+            DropState.minValue, DropState.maxValue,
+            DropState.excludeMut, DropState.mutOnly
+        }
+        DropState.minValue   = minV
+        DropState.maxValue   = maxV
+        DropState.excludeMut = protectMut
+        DropState.mutOnly    = false
+        local list = buildDropList()
+        DropState.minValue   = saved[1]; DropState.maxValue = saved[2]
+        DropState.excludeMut = saved[3]; DropState.mutOnly  = saved[4]
+        if #list == 0 then Library:Notify("Tidak ada kristal yang memenuhi preset!", 2); return end
+        Library:Notify(string.format("Membuang %d kristal (preset)...", #list), 2)
+        DropState.active = true
+        doDropAll(list, function(count)
+            DropState.active = false
+            Library:Notify(string.format("Preset selesai! %d dibuang", count), 3)
+        end)
     end
 
-    dropAllBtn.Text = "💥 Drop Semua"
-    statusLbl.Text  = "Selesai!"
-    refreshList()
-end)
+    AutoDropBox:AddButton("Buang Semua < 100k (Non-Mutasi)", function()
+        runPreset(0, 100000, true)
+    end)
+    AutoDropBox:AddButton("Buang Semua < 500k (Non-Mutasi)", function()
+        runPreset(0, 500000, true)
+    end)
+    AutoDropBox:AddButton("Buang Semua < 1M (Non-Mutasi)", function()
+        runPreset(0, 1000000, true)
+    end)
+    AutoDropBox:AddButton("Buang Semua < 5M (Non-Mutasi)", function()
+        runPreset(0, 5000000, true)
+    end)
 
--- Isi list awal
-refreshList()
+    AutoDropBox:AddDivider()
+    AutoDropBox:AddButton("Buang SEMUA Kristal [BAHAYA!]", function()
+        local all = scanInventory()
+        if #all == 0 then Library:Notify("Tas sudah kosong", 2); return end
+        Library:Notify(string.format("MEMBUANG SEMUA %d kristal!", #all), 4)
+        DropState.active = true
+        doDropAll(all, function(count)
+            DropState.active = false
+            Library:Notify(string.format("Selesai buang semua! %d kristal", count), 3)
+        end)
+    end)
 
-print("[DropKristal v6] Menu aktif - pilih kristal di kanan layar")
+    -- ── Heartbeat: auto loop + update label ──
+    local uiClock  = 0
+    local loopWait = 0
+
+    local dropLoopConn = RunService.Heartbeat:Connect(function(dt)
+        uiClock  = uiClock  + dt
+        loopWait = loopWait + dt
+
+        if uiClock >= 0.5 then
+            uiClock = 0
+            AutoStatusLabel:SetText(
+                DropState.loopActive
+                    and string.format("Auto Buang: aktif | setiap %.1fs", loopInterval)
+                    or  "Auto Buang: nonaktif"
+            )
+            TotalLabel:SetText(string.format("Total dibuang sesi ini: %d", DropState.droppedTotal))
+        end
+
+        if DropState.loopActive and not loopDropping and loopWait >= loopInterval then
+            loopWait     = 0
+            loopDropping = true
+            local list   = buildDropList()
+            if #list > 0 then
+                doDropAll(list, function()
+                    loopDropping = false
+                end)
+            else
+                loopDropping = false
+            end
+        end
+    end)
+
+    -- Daftarkan ke Connections supaya ikut cleanup saat Library:Unload()
+    if Connections then
+        Connections.dropLoopConn = dropLoopConn
+    end
+
+    Library:Notify("Modul Buang Kristal berhasil dimuat!", 3)
+end
