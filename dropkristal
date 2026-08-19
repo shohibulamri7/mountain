@@ -1,252 +1,140 @@
---[[
-    DropSemua.lua  (v4 – anti-error, semua pcall)
-]]
+-- DropSemua v5 - Simple, bertahap, anti error
 
--- ── Services ──────────────────────────────────────────────
-local ok, Players    = pcall(function() return game:GetService("Players") end)
-local ok2, Workspace = pcall(function() return game:GetService("Workspace") end)
-local ok3, CoreGui   = pcall(function() return game:GetService("CoreGui") end)
+local lp        = game.Players.LocalPlayer
+local CoreGui   = game:GetService("CoreGui")
 
-if not ok or not ok2 or not ok3 then
-    warn("[DropSemua] Gagal mendapatkan service!")
-    return
+local dropping  = false
+local btnRef    = nil
+
+-- Hapus GUI lama
+if CoreGui:FindFirstChild("DropGui") then
+    CoreGui:FindFirstChild("DropGui"):Destroy()
 end
 
-local lp = Players.LocalPlayer
-if not lp then
-    warn("[DropSemua] LocalPlayer tidak ditemukan!")
-    return
-end
+-- ─── Buat GUI ────────────────────────────────────────────
+local gui  = Instance.new("ScreenGui")
+gui.Name         = "DropGui"
+gui.ResetOnSpawn = false
+gui.Parent       = CoreGui
 
--- ── Konfigurasi ───────────────────────────────────────────
-local DELAY   = 0.06   -- jeda antar drop (detik)
-local HEIGHT  = 5      -- spawn di atas pemain (studs)
+local frame = Instance.new("Frame")
+frame.Size              = UDim2.new(0, 170, 0, 50)
+frame.Position          = UDim2.new(1, -180, 1, -70)
+frame.BackgroundColor3  = Color3.fromRGB(20, 20, 20)
+frame.BorderSizePixel   = 0
+frame.Parent            = gui
 
--- ── State & referensi ────────────────────────────────────
-local isDropping = false
-local btnRef     = nil
+local c1 = Instance.new("UICorner")
+c1.CornerRadius = UDim.new(0, 10)
+c1.Parent = frame
 
--- ── Notif aman ───────────────────────────────────────────
-local function notif(txt)
-    print("[DropSemua] " .. txt)
-    pcall(function()
-        game:GetService("StarterGui"):SetCore("SendNotification", {
-            Title = "Drop", Text = txt, Duration = 3
-        })
-    end)
-end
+local btn = Instance.new("TextButton")
+btn.Size            = UDim2.new(1, -8, 1, -8)
+btn.Position        = UDim2.new(0, 4, 0, 4)
+btn.BackgroundColor3 = Color3.fromRGB(200, 30, 30)
+btn.Text            = "🎒 DROP KRISTAL"
+btn.TextColor3      = Color3.new(1,1,1)
+btn.TextSize        = 15
+btn.Font            = Enum.Font.GothamBold
+btn.AutoButtonColor = false
+btn.BorderSizePixel = 0
+btn.Parent          = frame
+btnRef = btn
 
--- ── Set teks tombol ──────────────────────────────────────
-local function setBtn(txt)
-    pcall(function()
-        if btnRef and btnRef.Parent then
-            btnRef.Text = txt
-        end
-    end)
-end
+local c2 = Instance.new("UICorner")
+c2.CornerRadius = UDim.new(0, 7)
+c2.Parent = btn
 
--- ── Drop satu item ───────────────────────────────────────
-local function dropOne(tool, idx, total)
-    pcall(function()
-        local char = lp.Character
-        local hrp  = char and char:FindFirstChild("HumanoidRootPart")
-        if not hrp then return end
+-- ─── Logika Drop ─────────────────────────────────────────
+local function doDropAll()
+    if dropping then return end
+    dropping = true
 
-        -- Scatter melingkar
-        local angle  = (idx / total) * 2 * math.pi
-        local radius = 1 + (idx % 3) * 0.7
-        local pos    = Vector3.new(
-            hrp.Position.X + math.cos(angle) * radius,
-            hrp.Position.Y + HEIGHT,
-            hrp.Position.Z + math.sin(angle) * radius
-        )
+    -- Kumpulkan semua tool dari karakter + backpack
+    local tools = {}
 
-        -- Pindah ke Workspace
-        tool.Parent = Workspace
+    local char = lp.Character
+    if char then
+        -- Unequip dulu
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        if hum then hum:UnequipTools() end
+        task.wait(0.1)
 
-        -- Cari part
-        local part = tool:FindFirstChild("Handle")
-        if not part then part = tool.PrimaryPart end
-        if not part then
-            for _, v in ipairs(tool:GetChildren()) do
-                if v:IsA("BasePart") then part = v break end
+        for _, v in ipairs(char:GetChildren()) do
+            if v:IsA("Tool") then
+                table.insert(tools, v)
             end
         end
-        if not part then return end
+    end
 
-        -- Anchor → pindah → lepas
-        part.Anchored   = true
-        part.CanCollide = true
-        part.CFrame     = CFrame.new(pos)
-        task.wait()
-        part.Anchored   = false
-
-        -- Dorong keluar pakai BodyVelocity (lebih kompatibel)
-        pcall(function()
-            local bv      = Instance.new("BodyVelocity")
-            bv.Velocity   = Vector3.new(
-                math.cos(angle) * 4,
-                3,
-                math.sin(angle) * 4
-            )
-            bv.MaxForce   = Vector3.new(1e4, 1e4, 1e4)
-            bv.P          = 1e4
-            bv.Parent     = part
-            game:GetService("Debris"):AddItem(bv, 0.2)  -- hapus setelah 0.2 detik
-        end)
-    end)
-end
-
--- ── Fungsi utama ─────────────────────────────────────────
-local function dropAll()
-    if isDropping then return end
-    isDropping = true
-
-    pcall(function()
-        local char    = lp.Character
-        local backpack = lp:FindFirstChildOfClass("Backpack")
-        local hrp     = char and char:FindFirstChild("HumanoidRootPart")
-
-        if not hrp then
-            notif("Karakter tidak ada!")
-            isDropping = false
-            setBtn("🎒  DROP SEMUA")
-            return
-        end
-
-        -- Unequip
-        pcall(function()
-            local hum = char:FindFirstChildOfClass("Humanoid")
-            if hum then hum:UnequipTools() end
-        end)
-        task.wait()
-
-        -- Kumpulkan semua Tool
-        local tools = {}
-        pcall(function()
-            for _, v in ipairs(char:GetChildren()) do
-                if v:IsA("Tool") then tools[#tools+1] = v end
+    local bp = lp:FindFirstChildOfClass("Backpack")
+    if bp then
+        for _, v in ipairs(bp:GetChildren()) do
+            if v:IsA("Tool") then
+                table.insert(tools, v)
             end
-        end)
-        pcall(function()
-            if backpack then
-                for _, v in ipairs(backpack:GetChildren()) do
-                    if v:IsA("Tool") then tools[#tools+1] = v end
+        end
+    end
+
+    if #tools == 0 then
+        btn.Text = "Tas kosong!"
+        task.wait(1.5)
+        btn.Text = "🎒 DROP KRISTAL"
+        dropping = false
+        return
+    end
+
+    -- Drop satu per satu
+    for i, tool in ipairs(tools) do
+        btn.Text = i .. " / " .. #tools
+
+        -- Dapatkan posisi pemain saat ini
+        local hrp = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+        local basePos = hrp and hrp.Position or Vector3.new(0, 10, 0)
+
+        -- Pindahkan tool ke Workspace
+        tool.Parent = game.Workspace
+
+        -- Cari Handle
+        local handle = tool:FindFirstChild("Handle")
+        if not handle then
+            for _, part in ipairs(tool:GetDescendants()) do
+                if part:IsA("BasePart") then
+                    handle = part
+                    break
                 end
             end
-        end)
-
-        local total = #tools
-        if total == 0 then
-            notif("Tas kosong!")
-            isDropping = false
-            setBtn("🎒  DROP SEMUA")
-            return
         end
 
-        -- Drop satu per satu
-        for i, tool in ipairs(tools) do
-            setBtn("⏳  " .. i .. " / " .. total)
-            dropOne(tool, i, total)
-            task.wait(DELAY)
+        -- Set posisi di atas pemain agar tidak tembus lantai
+        if handle then
+            handle.Anchored   = true
+            handle.CanCollide = true
+
+            local angle = (i / #tools) * 2 * math.pi
+            handle.CFrame = CFrame.new(
+                basePos.X + math.cos(angle) * 2,
+                basePos.Y + 4,
+                basePos.Z + math.sin(angle) * 2
+            )
+
+            task.wait(0.05)
+            handle.Anchored = false
         end
 
-        setBtn("✅  SELESAI!")
-        notif(total .. " item selesai!")
-        task.wait(1.5)
-    end)
+        -- Jeda antar item (ubah angka ini untuk lebih cepat/lambat)
+        task.wait(0.1)
+    end
 
-    isDropping = false
-    setBtn("🎒  DROP SEMUA")
+    btn.Text = "✅ Selesai!"
+    task.wait(2)
+    btn.Text = "🎒 DROP KRISTAL"
+    dropping = false
 end
 
--- ════════════════════════════════════════════════════════
---  GUI
--- ════════════════════════════════════════════════════════
-pcall(function()
-    -- Hapus lama
-    local old = CoreGui:FindFirstChild("DropSemuaGui")
-    if old then old:Destroy() end
-
-    -- ScreenGui
-    local gui = Instance.new("ScreenGui")
-    gui.Name           = "DropSemuaGui"
-    gui.ResetOnSpawn   = false
-    gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-    gui.Parent         = CoreGui
-
-    -- Frame
-    local frame = Instance.new("Frame")
-    frame.Size             = UDim2.new(0, 175, 0, 55)
-    frame.Position         = UDim2.new(1, -190, 1, -75)
-    frame.BackgroundColor3 = Color3.fromRGB(15, 15, 15)
-    frame.BorderSizePixel  = 0
-    frame.Parent           = gui
-
-    local corner = Instance.new("UICorner")
-    corner.CornerRadius = UDim.new(0, 12)
-    corner.Parent       = frame
-
-    local stroke = Instance.new("UIStroke")
-    stroke.Color     = Color3.fromRGB(255, 70, 70)
-    stroke.Thickness = 2
-    stroke.Parent    = frame
-
-    -- Tombol
-    local btn = Instance.new("TextButton")
-    btn.Size             = UDim2.new(1, -10, 1, -10)
-    btn.Position         = UDim2.new(0, 5, 0, 5)
-    btn.BackgroundColor3 = Color3.fromRGB(210, 35, 35)
-    btn.BorderSizePixel  = 0
-    btn.Text             = "🎒  DROP SEMUA"
-    btn.TextColor3       = Color3.new(1, 1, 1)
-    btn.TextSize         = 16
-    btn.Font             = Enum.Font.GothamBold
-    btn.AutoButtonColor  = false
-    btn.Parent           = frame
-
-    local btnCorner = Instance.new("UICorner")
-    btnCorner.CornerRadius = UDim.new(0, 8)
-    btnCorner.Parent       = btn
-
-    btnRef = btn
-
-    btn.MouseEnter:Connect(function()
-        if not isDropping then btn.BackgroundColor3 = Color3.fromRGB(255, 55, 55) end
-    end)
-    btn.MouseLeave:Connect(function()
-        if not isDropping then btn.BackgroundColor3 = Color3.fromRGB(210, 35, 35) end
-    end)
-    btn.MouseButton1Down:Connect(function()
-        if not isDropping then btn.BackgroundColor3 = Color3.fromRGB(140, 15, 15) end
-    end)
-    btn.MouseButton1Up:Connect(function()
-        btn.BackgroundColor3 = Color3.fromRGB(210, 35, 35)
-    end)
-    btn.MouseButton1Click:Connect(function()
-        task.spawn(dropAll)
-    end)
-
-    -- Tombol ×
-    local xBtn = Instance.new("TextButton")
-    xBtn.Size             = UDim2.new(0, 18, 0, 18)
-    xBtn.Position         = UDim2.new(1, -20, 0, 2)
-    xBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
-    xBtn.BorderSizePixel  = 0
-    xBtn.Text             = "×"
-    xBtn.TextColor3       = Color3.new(1, 1, 1)
-    xBtn.TextSize         = 14
-    xBtn.Font             = Enum.Font.GothamBold
-    xBtn.ZIndex           = 5
-    xBtn.Parent           = frame
-
-    local xCorner = Instance.new("UICorner")
-    xCorner.CornerRadius = UDim.new(1, 0)
-    xCorner.Parent       = xBtn
-
-    xBtn.MouseButton1Click:Connect(function()
-        gui:Destroy()
-    end)
+-- Event klik tombol
+btn.MouseButton1Click:Connect(function()
+    task.spawn(doDropAll)
 end)
 
-print("[DropSemua v4] Tombol aktif di kanan bawah layar.")
+print("DropSemua v5 aktif - tombol di kanan bawah")
