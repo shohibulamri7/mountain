@@ -1,343 +1,466 @@
---[[
-╔══════════════════════════════════════════════════════════╗
-║           AUTO DROP CRYSTAL — sebelum disconnect         ║
-║                                                          ║
-║  • Klik tombol di layar untuk drop semua kristal         ║
-║  • Otomatis drop saat disconnect / login ganda           ║
-║  • Semua kristal jatuh ke tanah dalam 5 detik            ║
-╚══════════════════════════════════════════════════════════╝
-]]
+-- ═══════════════════════════════════════════════
+--  CRYSTAL DROPPER – Standalone, execute sendiri
+--  Tidak butuh script utama. Drop = Equip + Backspace
+-- ═══════════════════════════════════════════════
 
-local Players          = game:GetService("Players")
-local UserInputService = game:GetService("UserInputService")
-local GuiService       = game:GetService("GuiService")
-local CoreGui          = game:GetService("CoreGui")
-local Workspace        = game:GetService("Workspace")
-local TweenService     = game:GetService("TweenService")
+local LP  = game:GetService("Players").LocalPlayer
+local UIS = game:GetService("UserInputService")
 
-local LocalPlayer = Players.LocalPlayer
-local conns       = {}
-local sudahDrop   = false
+-- VirtualInputManager untuk simulasi Backspace server-side
+local VIM
+pcall(function() VIM = game:GetService("VirtualInputManager") end)
 
--- ──────────────────────────────────────────────────────────
---  Deteksi kristal
--- ──────────────────────────────────────────────────────────
-local function adalahKristal(tool)
-    if not tool or not tool:IsA("Tool") then return false end
-    local function attr(nama)
-        local ok, v = pcall(tool.GetAttribute, tool, nama)
-        return ok and v ~= nil
-    end
-    return attr("Value") or attr("Tier") or attr("WeightKg")
-        or tool.Name:find("Crystal", 1, true) ~= nil
+-- ── Attr helper ──
+local function attr(inst, name)
+    if not inst then return nil end
+    local ok, v = pcall(inst.GetAttribute, inst, name)
+    return ok and v or nil
 end
 
-local function ambilSemuaKristal()
+local function crVal(t)  return tonumber(attr(t,"Value"))    or 0 end
+local function crTier(t) return tonumber(attr(t,"Tier"))     or 0 end
+local function crMut(t)
+    local m = attr(t,"Mutation")
+    return type(m)=="string" and m~="" and m~="None"
+end
+local function crName(t)
+    local n = attr(t,"CrystalName")
+    return (type(n)=="string" and n~="") and n or t.Name
+end
+
+-- Format angka singkat
+local function fmt(n)
+    n = tonumber(n) or 0
+    if n >= 1e12 then return string.format("%.1fT",n/1e12)
+    elseif n >= 1e9  then return string.format("%.1fB",n/1e9)
+    elseif n >= 1e6  then return string.format("%.1fM",n/1e6)
+    elseif n >= 1e3  then return string.format("%.1fk",n/1e3)
+    else return tostring(math.floor(n)) end
+end
+
+-- Parse "2m" → 2000000
+local function parse(s)
+    if type(s)~="string" then return nil end
+    s = s:lower():gsub("[%s,$]","")
+    local n,sf = s:match("^(%d*%.?%d+)(%a*)$")
+    if not n then return nil end
+    n = tonumber(n)
+    local mul = {k=1e3,m=1e6,b=1e9,t=1e12}
+    return n * (mul[sf] or 1)
+end
+
+-- ── Scan kristal di inventory ──
+local function getInventory()
     local list = {}
-    local function scan(container)
-        if not container then return end
-        for _, child in ipairs(container:GetChildren()) do
-            if adalahKristal(child) then list[#list + 1] = child end
+    local function scan(c)
+        if not c then return end
+        for _, t in ipairs(c:GetChildren()) do
+            if t:IsA("Tool") and attr(t,"Tier") ~= nil then
+                list[#list+1] = t
+            end
         end
     end
-    scan(LocalPlayer.Character)
-    scan(LocalPlayer:FindFirstChildOfClass("Backpack"))
+    scan(LP:FindFirstChildOfClass("Backpack"))
+    scan(LP.Character)
     return list
 end
 
--- ──────────────────────────────────────────────────────────
---  Drop satu kristal ke posisi tertentu
--- ──────────────────────────────────────────────────────────
-local function dropSatu(tool, posisi)
-    if not tool or not tool.Parent then return end
-    local handle = tool:FindFirstChild("Handle")
-        or tool:FindFirstChildWhichIsA("BasePart")
-    if handle then
-        pcall(function()
-            handle.CFrame   = CFrame.new(posisi)
-            handle.Anchored = false
-        end)
+-- ── Build daftar kristal yang akan di-drop (pakai filter) ──
+local function buildDropList(maxVal, protectMut)
+    local all = getInventory()
+    local list = {}
+    for _, t in ipairs(all) do
+        local v = crVal(t)
+        if v <= maxVal then
+            if protectMut and crMut(t) then
+                -- skip mutasi
+            else
+                list[#list+1] = t
+            end
+        end
     end
-    pcall(function() tool.Parent = Workspace end)
+    -- Sort: nilai terkecil dulu
+    table.sort(list, function(a,b) return crVal(a) < crVal(b) end)
+    return list
 end
 
--- ──────────────────────────────────────────────────────────
---  GUI — tombol drop
--- ──────────────────────────────────────────────────────────
+-- ── Drop satu tool: equip → Backspace ──
+local function dropOne(tool)
+    local char = LP.Character
+    local hum  = char and char:FindFirstChildOfClass("Humanoid")
+    if not hum then return false end
+
+    -- Equip
+    local ok = pcall(hum.EquipTool, hum, tool)
+    if not ok then return false end
+    task.wait(0.006)  -- sedikit jeda setelah equip agar server menerima
+
+    -- Backspace via VirtualInputManager (server-side, terlihat semua player)
+    if VIM then
+        pcall(function()
+            VIM:SendKeyEvent(true,  Enum.KeyCode.Backspace, false, game)
+            task.wait(0.001)
+            VIM:SendKeyEvent(false, Enum.KeyCode.Backspace, false, game)
+        end)
+        return true
+    end
+
+    -- Fallback: simulasi keydown via UIS (beberapa executor support)
+    pcall(function()
+        local f = Instance.new("InputObject")
+        f.KeyCode       = Enum.KeyCode.Backspace
+        f.UserInputType = Enum.UserInputType.Keyboard
+        f.UserInputState= Enum.UserInputState.Begin
+        UIS.InputBegan:Fire(f, false)
+        task.wait(0.001)
+        f.UserInputState = Enum.UserInputState.End
+        UIS.InputEnded:Fire(f, false)
+    end)
+    return true
+end
+
+-- ── Drop semua yang sesuai filter ──
+local dropping = false
+
+local function dropAll(maxVal, protectMut, delay, onStatus)
+    if dropping then return end
+    dropping = true
+
+    local list = buildDropList(maxVal, protectMut)
+
+    if #list == 0 then
+        dropping = false
+        if onStatus then onStatus("Tidak ada kristal yang sesuai filter") end
+        return 0
+    end
+
+    if onStatus then onStatus(string.format("Mulai drop %d kristal...", #list)) end
+    task.wait(0.1)
+
+    local count = 0
+    for i, tool in ipairs(list) do
+        if not dropping then break end
+        if tool and tool.Parent then
+            if onStatus then onStatus(string.format("Drop %d/%d  %s ($%s)", i, #list, crName(tool), fmt(crVal(tool)))) end
+            dropOne(tool)
+            count = count + 1
+            task.wait(delay)
+        end
+    end
+
+    dropping = false
+    if onStatus then onStatus(string.format("Selesai! %d kristal di-drop", count)) end
+    return count
+end
+
+-- ════════════════════════════════════════
+--  UI SEDERHANA (ScreenGui sendiri)
+-- ════════════════════════════════════════
+
 -- Hapus GUI lama jika ada
-pcall(function()
-    local old = CoreGui:FindFirstChild("AutoDropGui")
-    if old then old:Destroy() end
-end)
+local function getRoot()
+    local ok, h = pcall(function() return gethui() end)
+    if ok and typeof(h)=="Instance" then return h end
+    return LP:FindFirstChildOfClass("PlayerGui") or game:GetService("CoreGui")
+end
 
-local screenGui = Instance.new("ScreenGui")
-screenGui.Name            = "AutoDropGui"
-screenGui.ResetOnSpawn    = false
-screenGui.IgnoreGuiInset  = true
-screenGui.ZIndexBehavior  = Enum.ZIndexBehavior.Sibling
+local guiRoot = getRoot()
+local oldGui  = guiRoot:FindFirstChild("CrystalDropper")
+if oldGui then oldGui:Destroy() end
 
--- Coba pasang di gethui() atau CoreGui agar tidak terhapus saat respawn
-local guiParent = CoreGui
-pcall(function()
-    local ok, h = pcall(gethui)
-    if ok and typeof(h) == "Instance" then guiParent = h end
-end)
-screenGui.Parent = guiParent
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name            = "CrystalDropper"
+ScreenGui.ResetOnSpawn    = false
+ScreenGui.ZIndexBehavior  = Enum.ZIndexBehavior.Sibling
+ScreenGui.DisplayOrder    = 999
+ScreenGui.IgnoreGuiInset  = true
+ScreenGui.Parent          = guiRoot
 
--- Frame utama (bisa di-drag)
-local frame = Instance.new("Frame")
-frame.Name              = "MainFrame"
-frame.Size              = UDim2.fromOffset(220, 110)
-frame.Position          = UDim2.fromOffset(20, 20)
-frame.BackgroundColor3  = Color3.fromRGB(18, 18, 24)
-frame.BorderSizePixel   = 0
-frame.Active            = true
-frame.Draggable         = true
-frame.Parent            = screenGui
+-- Frame utama (diperbesar untuk menampung label preview)
+local Main = Instance.new("Frame")
+Main.Name              = "Main"
+Main.Size              = UDim2.new(0, 320, 0, 440)
+Main.Position          = UDim2.new(0.5, -160, 0.5, -220)
+Main.BackgroundColor3  = Color3.fromRGB(20, 20, 28)
+Main.BorderSizePixel   = 0
+Main.Active            = true
+Main.Draggable         = true
+Main.Parent            = ScreenGui
 
--- Sudut membulat
-local corner = Instance.new("UICorner")
-corner.CornerRadius = UDim.new(0, 10)
-corner.Parent       = frame
+Instance.new("UICorner", Main).CornerRadius = UDim.new(0, 10)
 
 -- Stroke
-local stroke = Instance.new("UIStroke")
-stroke.Color        = Color3.fromRGB(80, 80, 120)
-stroke.Thickness    = 1.5
-stroke.Parent       = frame
+local stroke = Instance.new("UIStroke", Main)
+stroke.Color     = Color3.fromRGB(0, 200, 255)
+stroke.Thickness = 1.5
 
--- Judul
-local title = Instance.new("TextLabel")
-title.Size                  = UDim2.new(1, 0, 0, 30)
-title.Position              = UDim2.fromOffset(0, 0)
-title.BackgroundColor3      = Color3.fromRGB(30, 30, 45)
-title.BorderSizePixel       = 0
-title.Text                  = "⬇  Auto Drop Crystal"
-title.TextColor3            = Color3.fromRGB(200, 200, 255)
-title.TextSize              = 13
-title.Font                  = Enum.Font.GothamBold
-title.Parent                = frame
+-- Title bar
+local TitleBar = Instance.new("Frame")
+TitleBar.Size             = UDim2.new(1, 0, 0, 36)
+TitleBar.BackgroundColor3 = Color3.fromRGB(0, 150, 220)
+TitleBar.BorderSizePixel  = 0
+TitleBar.Parent           = Main
+Instance.new("UICorner", TitleBar).CornerRadius = UDim.new(0, 10)
 
-local titleCorner = Instance.new("UICorner")
-titleCorner.CornerRadius = UDim.new(0, 10)
-titleCorner.Parent       = title
+-- Fix sudut bawah titlebar
+local Fix = Instance.new("Frame")
+Fix.Size             = UDim2.new(1, 0, 0.5, 0)
+Fix.AnchorPoint      = Vector2.new(0, 1)
+Fix.Position         = UDim2.new(0, 0, 1, 0)
+Fix.BackgroundColor3 = Color3.fromRGB(0, 150, 220)
+Fix.BorderSizePixel  = 0
+Fix.Parent           = TitleBar
 
--- Label status
-local statusLabel = Instance.new("TextLabel")
-statusLabel.Size            = UDim2.new(1, -16, 0, 24)
-statusLabel.Position        = UDim2.fromOffset(8, 36)
-statusLabel.BackgroundTransparency = 1
-statusLabel.Text            = "Siap — klik tombol untuk drop"
-statusLabel.TextColor3      = Color3.fromRGB(160, 160, 180)
-statusLabel.TextSize        = 11
-statusLabel.Font            = Enum.Font.Gotham
-statusLabel.TextXAlignment  = Enum.TextXAlignment.Left
-statusLabel.Parent          = frame
+local Title = Instance.new("TextLabel")
+Title.Size              = UDim2.new(1, -40, 1, 0)
+Title.Position          = UDim2.new(0, 12, 0, 0)
+Title.BackgroundTransparency = 1
+Title.Text              = "Crystal Dropper"
+Title.TextColor3        = Color3.new(1,1,1)
+Title.Font              = Enum.Font.GothamBold
+Title.TextSize          = 15
+Title.TextXAlignment    = Enum.TextXAlignment.Left
+Title.Parent            = TitleBar
 
--- Tombol DROP
-local btn = Instance.new("TextButton")
-btn.Size               = UDim2.new(1, -16, 0, 36)
-btn.Position           = UDim2.fromOffset(8, 66)
-btn.BackgroundColor3   = Color3.fromRGB(220, 60, 60)
-btn.BorderSizePixel    = 0
-btn.Text               = "DROP SEMUA KRISTAL (5 detik)"
-btn.TextColor3         = Color3.fromRGB(255, 255, 255)
-btn.TextSize           = 12
-btn.Font               = Enum.Font.GothamBold
-btn.AutoButtonColor    = false
-btn.Parent             = frame
+-- Tombol tutup
+local CloseBtn = Instance.new("TextButton")
+CloseBtn.Size             = UDim2.new(0, 30, 0, 30)
+CloseBtn.Position         = UDim2.new(1, -33, 0, 3)
+CloseBtn.BackgroundColor3 = Color3.fromRGB(220, 50, 50)
+CloseBtn.Text             = "✕"
+CloseBtn.TextColor3       = Color3.new(1,1,1)
+CloseBtn.Font             = Enum.Font.GothamBold
+CloseBtn.TextSize         = 14
+CloseBtn.BorderSizePixel  = 0
+CloseBtn.Parent           = TitleBar
+Instance.new("UICorner", CloseBtn).CornerRadius = UDim.new(0, 6)
+CloseBtn.MouseButton1Click:Connect(function() ScreenGui:Destroy() end)
 
-local btnCorner = Instance.new("UICorner")
-btnCorner.CornerRadius = UDim.new(0, 8)
-btnCorner.Parent       = btn
+-- Container isi
+local Content = Instance.new("Frame")
+Content.Size             = UDim2.new(1, -16, 1, -48)
+Content.Position         = UDim2.new(0, 8, 0, 42)
+Content.BackgroundTransparency = 1
+Content.Parent           = Main
 
--- ──────────────────────────────────────────────────────────
---  Fungsi utama DROP SEMUA dalam 5 detik
--- ──────────────────────────────────────────────────────────
-local sedangDrop = false
+local Layout = Instance.new("UIListLayout")
+Layout.SortOrder    = Enum.SortOrder.LayoutOrder
+Layout.Padding      = UDim.new(0, 6)
+Layout.Parent       = Content
 
-local function dropSemua(alasan)
-    if sedangDrop then return end
-    sedangDrop = true
-    sudahDrop  = true
+-- Helper buat label
+local function mkLabel(text, order)
+    local l = Instance.new("TextLabel")
+    l.LayoutOrder        = order
+    l.Size               = UDim2.new(1, 0, 0, 18)
+    l.BackgroundTransparency = 1
+    l.Text               = text
+    l.TextColor3         = Color3.fromRGB(180, 180, 200)
+    l.Font               = Enum.Font.Gotham
+    l.TextSize           = 12
+    l.TextXAlignment     = Enum.TextXAlignment.Left
+    l.Parent             = Content
+    return l
+end
 
-    local kristal = ambilSemuaKristal()
-    local jumlah  = #kristal
+-- Helper buat input
+local function mkInput(label, default, order)
+    local wrap = Instance.new("Frame")
+    wrap.LayoutOrder        = order
+    wrap.Size               = UDim2.new(1, 0, 0, 32)
+    wrap.BackgroundColor3   = Color3.fromRGB(30, 30, 42)
+    wrap.BorderSizePixel    = 0
+    wrap.Parent             = Content
+    Instance.new("UICorner", wrap).CornerRadius = UDim.new(0, 6)
 
-    -- Update status
-    local function setStatus(text, warna)
-        pcall(function()
-            statusLabel.Text       = text
-            statusLabel.TextColor3 = warna or Color3.fromRGB(160, 160, 180)
-        end)
+    local lbl = Instance.new("TextLabel")
+    lbl.Size              = UDim2.new(0, 110, 1, 0)
+    lbl.BackgroundTransparency = 1
+    lbl.Text              = label
+    lbl.TextColor3        = Color3.fromRGB(160, 160, 180)
+    lbl.Font              = Enum.Font.Gotham
+    lbl.TextSize          = 12
+    lbl.TextXAlignment    = Enum.TextXAlignment.Left
+    lbl.Position          = UDim2.new(0, 8, 0, 0)
+    lbl.Parent            = wrap
+
+    local box = Instance.new("TextBox")
+    box.Size              = UDim2.new(1, -120, 0, 24)
+    box.Position          = UDim2.new(0, 116, 0.5, -12)
+    box.BackgroundColor3  = Color3.fromRGB(40, 40, 56)
+    box.Text              = default
+    box.TextColor3        = Color3.new(1,1,1)
+    box.Font              = Enum.Font.Gotham
+    box.TextSize          = 13
+    box.ClearTextOnFocus  = false
+    box.BorderSizePixel   = 0
+    box.Parent            = wrap
+    Instance.new("UICorner", box).CornerRadius = UDim.new(0, 4)
+    return box
+end
+
+-- Helper buat toggle
+local function mkToggle(text, default, order, onChange)
+    local wrap = Instance.new("Frame")
+    wrap.LayoutOrder       = order
+    wrap.Size              = UDim2.new(1, 0, 0, 28)
+    wrap.BackgroundTransparency = 1
+    wrap.Parent            = Content
+
+    local btn = Instance.new("TextButton")
+    btn.Size             = UDim2.new(0, 42, 0, 22)
+    btn.AnchorPoint      = Vector2.new(1, 0.5)
+    btn.Position         = UDim2.new(1, 0, 0.5, 0)
+    btn.BorderSizePixel  = 0
+    btn.Font             = Enum.Font.GothamBold
+    btn.TextSize         = 11
+    btn.Parent           = wrap
+    Instance.new("UICorner", btn).CornerRadius = UDim.new(1, 0)
+
+    local lbl = Instance.new("TextLabel")
+    lbl.Size             = UDim2.new(1, -50, 1, 0)
+    lbl.BackgroundTransparency = 1
+    lbl.Text             = text
+    lbl.TextColor3       = Color3.fromRGB(200, 200, 210)
+    lbl.Font             = Enum.Font.Gotham
+    lbl.TextSize         = 12
+    lbl.TextXAlignment   = Enum.TextXAlignment.Left
+    lbl.Parent           = wrap
+
+    local state = default
+    local function refresh()
+        btn.BackgroundColor3 = state and Color3.fromRGB(0,200,100) or Color3.fromRGB(80,80,90)
+        btn.Text             = state and "ON" or "OFF"
+        btn.TextColor3       = Color3.new(1,1,1)
     end
-
-    if jumlah == 0 then
-        setStatus("Tidak ada kristal!", Color3.fromRGB(255, 180, 60))
-        task.delay(2, function()
-            sedangDrop = false
-            sudahDrop  = false
-            setStatus("Siap — klik tombol untuk drop")
-            btn.BackgroundColor3 = Color3.fromRGB(220, 60, 60)
-            btn.Text = "DROP SEMUA KRISTAL (5 detik)"
-            btn.Active = true
-        end)
-        return
-    end
-
-    -- Nonaktifkan tombol selama proses
-    btn.Active = false
-    btn.BackgroundColor3 = Color3.fromRGB(100, 30, 30)
-
-    print(string.format("[AutoDrop] Drop %d kristal dalam 5 detik... (%s)", jumlah, alasan))
-
-    -- Unequip dulu
-    pcall(function()
-        local char     = LocalPlayer.Character
-        local humanoid = char and char:FindFirstChildOfClass("Humanoid")
-        if humanoid then humanoid:UnequipTools() end
+    refresh()
+    btn.MouseButton1Click:Connect(function()
+        state = not state; refresh()
+        if onChange then onChange(state) end
     end)
+    return function() return state end
+end
 
-    -- Posisi jatuh dari kaki karakter
-    local root = LocalPlayer.Character
-        and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
-    local pusatPos = root and root.Position or Vector3.new(0, 5, 0)
+-- Helper buat tombol
+local function mkButton(text, color, order, onClick)
+    local btn = Instance.new("TextButton")
+    btn.LayoutOrder       = order
+    btn.Size              = UDim2.new(1, 0, 0, 34)
+    btn.BackgroundColor3  = color
+    btn.Text              = text
+    btn.TextColor3        = Color3.new(1,1,1)
+    btn.Font              = Enum.Font.GothamBold
+    btn.TextSize          = 13
+    btn.BorderSizePixel   = 0
+    btn.Parent            = Content
+    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 7)
+    btn.MouseButton1Click:Connect(onClick)
+    return btn
+end
 
-    -- Jeda antar drop agar selesai dalam 5 detik
-    local BATAS    = 5.0
-    local jedaDrop = math.max(0.05, math.min(BATAS / jumlah, 0.4))
-    local mulai    = os.clock()
+-- ── Elemen UI ──
+mkLabel("Max Nilai Kristal yang Dibuang:", 1)
+local inputMaxVal = mkInput("Max Nilai:", "500k", 2)
 
+mkLabel("Jeda antar drop (ms, min 1):", 3)
+local inputDelay = mkInput("Delay (ms):", "1", 4)
+
+local getProtectMut = mkToggle("Lindungi kristal bermutasi", true, 5, nil)
+
+-- ── Label Preview Jumlah ──
+local PreviewLbl = Instance.new("TextLabel")
+PreviewLbl.LayoutOrder        = 6
+PreviewLbl.Size               = UDim2.new(1, 0, 0, 22)
+PreviewLbl.BackgroundColor3   = Color3.fromRGB(25, 25, 38)
+PreviewLbl.Text               = "📦 Preview: ketik nilai lalu klik Hitung"
+PreviewLbl.TextColor3         = Color3.fromRGB(255, 220, 80)
+PreviewLbl.Font               = Enum.Font.GothamBold
+PreviewLbl.TextSize           = 11
+PreviewLbl.TextXAlignment     = Enum.TextXAlignment.Left
+PreviewLbl.TextTruncate       = Enum.TextTruncate.AtEnd
+PreviewLbl.BorderSizePixel    = 0
+PreviewLbl.Parent             = Content
+Instance.new("UICorner", PreviewLbl).CornerRadius = UDim.new(0, 5)
+do
+    local pad = Instance.new("UIPadding", PreviewLbl)
+    pad.PaddingLeft = UDim.new(0, 6)
+end
+
+-- Tombol Hitung Preview
+mkButton("🔍 Hitung Jumlah (Preview)", Color3.fromRGB(60, 60, 100), 7, function()
+    local maxV     = parse(inputMaxVal.Text) or math.huge
+    local protMut  = getProtectMut()
+    local list     = buildDropList(maxV, protMut)
+    local totalVal = 0
+    for _, t in ipairs(list) do totalVal = totalVal + crVal(t) end
+    PreviewLbl.Text = string.format(
+        "📦 %d kristal siap drop  |  Total: $%s",
+        #list, fmt(totalVal)
+    )
+    PreviewLbl.TextColor3 = #list > 0
+        and Color3.fromRGB(100, 255, 150)
+        or  Color3.fromRGB(255, 100, 100)
+end)
+
+local StatusLbl = mkLabel("Status: siap", 8)
+StatusLbl.TextColor3 = Color3.fromRGB(100, 220, 100)
+StatusLbl.TextSize   = 12
+
+-- ── Separator ──
+local sep = Instance.new("Frame")
+sep.LayoutOrder        = 9
+sep.Size               = UDim2.new(1, 0, 0, 1)
+sep.BackgroundColor3   = Color3.fromRGB(60, 60, 80)
+sep.BorderSizePixel    = 0
+sep.Parent             = Content
+
+-- ── Tombol-tombol ──
+mkButton("DROP (pakai filter di atas)", Color3.fromRGB(0,160,230), 10, function()
+    if dropping then StatusLbl.Text = "Status: sedang berjalan..."; return end
+    local maxV  = parse(inputMaxVal.Text) or math.huge
+    local delay = (tonumber(inputDelay.Text) or 1) / 1000
+    delay = math.max(delay, 0.001)   -- minimum 1 ms
+    local protMut = getProtectMut()
     task.spawn(function()
-        for i, tool in ipairs(kristal) do
-            local elapsed = os.clock() - mulai
-            if elapsed >= BATAS then
-                setStatus(string.format("Waktu habis! Sisa %d", jumlah - i + 1), Color3.fromRGB(255, 100, 60))
-                break
-            end
-
-            -- Posisi menyebar melingkar
-            local sudut    = (i - 1) * (math.pi * 2 / jumlah)
-            local posJatuh = pusatPos + Vector3.new(
-                math.cos(sudut) * 2.5,
-                0.3,
-                math.sin(sudut) * 2.5
-            )
-
-            dropSatu(tool, posJatuh)
-
-            -- Update tombol dengan countdown
-            local sisaWaktu = math.max(0, BATAS - (os.clock() - mulai))
-            pcall(function()
-                btn.Text = string.format("Drop %d/%d  (%.1fs)", i, jumlah, sisaWaktu)
-            end)
-            setStatus(string.format("Menjatuhkan %d/%d kristal...", i, jumlah), Color3.fromRGB(100, 220, 100))
-
-            task.wait(jedaDrop)
-        end
-
-        -- Selesai
-        local totalWaktu = os.clock() - mulai
-        print(string.format("[AutoDrop] Selesai: %d kristal di-drop dalam %.2f detik", jumlah, totalWaktu))
-        setStatus(string.format("✓ %d kristal dijatuhkan (%.1fs)", jumlah, totalWaktu), Color3.fromRGB(80, 220, 100))
-
-        btn.Text             = "DROP SEMUA KRISTAL (5 detik)"
-        btn.BackgroundColor3 = Color3.fromRGB(220, 60, 60)
-        btn.Active           = true
-        sedangDrop           = false
-
-        -- Reset flag setelah 3 detik agar bisa dipakai lagi
-        task.delay(3, function() sudahDrop = false end)
-    end)
-end
-
--- ──────────────────────────────────────────────────────────
---  Hover effect tombol
--- ──────────────────────────────────────────────────────────
-btn.MouseEnter:Connect(function()
-    if not sedangDrop then
-        TweenService:Create(btn, TweenInfo.new(0.15), {
-            BackgroundColor3 = Color3.fromRGB(255, 80, 80)
-        }):Play()
-    end
-end)
-
-btn.MouseLeave:Connect(function()
-    if not sedangDrop then
-        TweenService:Create(btn, TweenInfo.new(0.15), {
-            BackgroundColor3 = Color3.fromRGB(220, 60, 60)
-        }):Play()
-    end
-end)
-
--- ──────────────────────────────────────────────────────────
---  Klik tombol → drop
--- ──────────────────────────────────────────────────────────
-btn.MouseButton1Click:Connect(function()
-    dropSemua("Tombol GUI")
-end)
-
--- ──────────────────────────────────────────────────────────
---  AUTO TRIGGER saat disconnect / login ganda
--- ──────────────────────────────────────────────────────────
-conns[1] = LocalPlayer.CharacterRemoving:Connect(function()
-    if not sudahDrop then
-        dropSemua("CharacterRemoving — disconnect / login ganda")
-    end
-end)
-
-conns[2] = LocalPlayer.CharacterAdded:Connect(function()
-    task.delay(3, function()
-        sudahDrop  = false
-        sedangDrop = false
-        pcall(function()
-            statusLabel.Text       = "Siap — klik tombol untuk drop"
-            statusLabel.TextColor3 = Color3.fromRGB(160, 160, 180)
-            btn.Text             = "DROP SEMUA KRISTAL (5 detik)"
-            btn.BackgroundColor3 = Color3.fromRGB(220, 60, 60)
-            btn.Active           = true
-        end)
+        dropAll(maxV, protMut, delay, function(s) StatusLbl.Text = "Status: "..s end)
     end)
 end)
 
-conns[3] = Players.PlayerRemoving:Connect(function(player)
-    if player == LocalPlayer and not sudahDrop then
-        dropSemua("PlayerRemoving — keluar server")
-    end
+mkButton("DROP < 100k  (Non-Mutasi)", Color3.fromRGB(50,130,50), 11, function()
+    if dropping then return end
+    local delay = math.max((tonumber(inputDelay.Text) or 1) / 1000, 0.001)
+    task.spawn(function()
+        dropAll(100000, true, delay, function(s) StatusLbl.Text = "Status: "..s end)
+    end)
 end)
 
-conns[4] = GuiService.ErrorMessageChanged:Connect(function()
-    local ok, msg = pcall(function() return GuiService:GetErrorMessage() end)
-    if ok and type(msg) == "string" and msg ~= "" and not sudahDrop then
-        dropSemua("Kicked: " .. msg:sub(1, 30))
-    end
+mkButton("DROP < 1M  (Non-Mutasi)", Color3.fromRGB(180,120,0), 12, function()
+    if dropping then return end
+    local delay = math.max((tonumber(inputDelay.Text) or 1) / 1000, 0.001)
+    task.spawn(function()
+        dropAll(1000000, true, delay, function(s) StatusLbl.Text = "Status: "..s end)
+    end)
 end)
 
-pcall(function()
-    local gui     = CoreGui:FindFirstChild("RobloxPromptGui")
-    local overlay = gui and gui:FindFirstChild("promptOverlay")
-    if overlay then
-        conns[5] = overlay.ChildAdded:Connect(function(child)
-            if (child.Name:find("Error") or child.Name:find("Disconnect")) and not sudahDrop then
-                dropSemua("Popup: " .. child.Name)
-            end
-        end)
-    end
+mkButton("DROP SEMUA (BAHAYA!)", Color3.fromRGB(180,30,30), 13, function()
+    if dropping then return end
+    local delay = math.max((tonumber(inputDelay.Text) or 1) / 1000, 0.001)
+    task.spawn(function()
+        dropAll(math.huge, false, delay, function(s) StatusLbl.Text = "Status: "..s end)
+    end)
 end)
 
--- ──────────────────────────────────────────────────────────
---  Cleanup
--- ──────────────────────────────────────────────────────────
-local function cleanup()
-    for _, c in ipairs(conns) do
-        if c then pcall(function() c:Disconnect() end) end
-    end
-    table.clear(conns)
-    pcall(function() screenGui:Destroy() end)
-    print("[AutoDrop] Unloaded.")
-end
+mkButton("STOP", Color3.fromRGB(80,80,90), 14, function()
+    dropping = false
+    StatusLbl.Text = "Status: dihentikan"
+end)
 
-local getgenv = getgenv or function() return _G end
-getgenv().AutoDropUnload = cleanup
+-- Info VIM
+local vimLbl = mkLabel(
+    VIM and "VIM: aktif (drop terlihat semua player)"
+         or "VIM: tidak tersedia (coba executor lain)",
+    15
+)
+vimLbl.TextColor3 = VIM and Color3.fromRGB(100,255,100) or Color3.fromRGB(255,160,60)
 
-print("[AutoDrop] Aktif! GUI muncul di layar kiri atas.")
+print("[CrystalDropper] Loaded! VIM:", VIM ~= nil)
