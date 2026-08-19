@@ -1,0 +1,300 @@
+--[[
+    AutoDropCrystal.lua
+    ════════════════════════════════════════════════════════
+    Script otomatis melepas / menjatuhkan kristal yang sedang
+    dipegang ketika:
+      1. Pemain akan disconnect (kicked / error koneksi)
+      2. Akun yang sama login di perangkat lain  → karakter dihapus
+      3. Rejoin manual / teleportasi keluar
+      4. Tombol manual ditekan (untuk testing bug)
+    ════════════════════════════════════════════════════════
+    Cara pakai  : loadstring(game:HttpGet("URL_SCRIPT"))()
+    Standalone  : tidak perlu script lain, bisa dijalankan sendiri
+]]
+
+-- ─── Penjaga double-load ────────────────────────────────
+local getgenv = getgenv or function() return _G end
+if getgenv().AutoDropLoaded then
+    if getgenv().AutoDropUnload then pcall(getgenv().AutoDropUnload) end
+end
+getgenv().AutoDropLoaded = true
+
+-- ─── Services ───────────────────────────────────────────
+local Players           = game:GetService("Players")
+local RunService        = game:GetService("RunService")
+local UserInputService  = game:GetService("UserInputService")
+local TeleportService   = game:GetService("TeleportService")
+local GuiService        = game:GetService("GuiService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local CoreGui           = game:GetService("CoreGui")
+
+local LocalPlayer       = Players.LocalPlayer
+local Connections       = {}
+
+-- ─── Konfigurasi ────────────────────────────────────────
+local Config = {
+    -- Nama folder remote di ReplicatedStorage
+    RemotesFolder   = "Remotes",
+    -- Remote khusus untuk drop kristal (isi sesuai game target, kosongkan jika tidak ada)
+    DropRemoteName  = "DropCrystal",
+    -- Fallback: remote jual semua
+    SellRemoteName  = "SellRequest",
+
+    -- Tombol manual untuk memaksa drop (testing)
+    ManualDropKey   = Enum.KeyCode.F9,
+
+    -- Delay kecil sebelum drop saat event terdeteksi (detik)
+    DropDelay       = 0.05,
+
+    -- Apakah unequip tool dari karakter secara lokal
+    UnequipOnDrop   = true,
+
+    -- Apakah pakai SellAll sebagai fallback jika remote Drop tidak ada
+    FallbackToSell  = true,
+
+    -- Interval cek kesehatan koneksi (detik)
+    HeartbeatCheck  = 1.0,
+}
+
+-- ─── Utilitas ───────────────────────────────────────────
+local function notify_(msg, dur)
+    pcall(function()
+        game:GetService("StarterGui"):SetCore("SendNotification", {
+            Title    = "AutoDropCrystal",
+            Text     = tostring(msg),
+            Duration = dur or 3,
+        })
+    end)
+    print("[AutoDropCrystal] " .. tostring(msg))
+end
+
+-- ─── Cari remote ────────────────────────────────────────
+local function findRemote(name)
+    if name == "" or name == nil then return nil end
+    local folder = ReplicatedStorage:FindFirstChild(Config.RemotesFolder)
+        or ReplicatedStorage:WaitForChild(Config.RemotesFolder, 5)
+    if not folder then return nil end
+    return folder:FindFirstChild(name)
+end
+
+local function getRemotes()
+    return {
+        drop = findRemote(Config.DropRemoteName),
+        sell = findRemote(Config.SellRemoteName),
+    }
+end
+
+-- ─── Detektor kristal di tangan / backpack ──────────────
+local function getAttr(inst, name)
+    if not inst then return nil end
+    local ok, v = pcall(inst.GetAttribute, inst, name)
+    return ok and v or nil
+end
+
+local function isCrystal(inst)
+    if not inst then return false end
+    if not inst:IsA("Tool") then return false end
+    if getAttr(inst, "Value") ~= nil then return true end
+    if getAttr(inst, "Tier")  ~= nil then return true end
+    if inst.Name:find("Crystal", 1, true) then return true end
+    return false
+end
+
+local function collectHeldCrystals()
+    local list      = {}
+    local character = LocalPlayer.Character
+    local backpack  = LocalPlayer:FindFirstChildOfClass("Backpack")
+
+    local function scan(container)
+        if not container then return end
+        for _, child in ipairs(container:GetChildren()) do
+            if isCrystal(child) then list[#list + 1] = child end
+        end
+    end
+
+    scan(character)
+    scan(backpack)
+    return list
+end
+
+-- ─── Logika Drop / Lepas Kristal ────────────────────────
+local dropped = false   -- flag agar hanya drop sekali per sesi
+
+local function performDrop(reason)
+    if dropped then return end
+    dropped = true
+
+    local remotes  = getRemotes()
+    local crystals = collectHeldCrystals()
+    local count    = #crystals
+
+    if count == 0 then
+        notify_("Tidak ada kristal yang perlu dilepas. (" .. reason .. ")", 3)
+        return
+    end
+
+    notify_(string.format("Melepas %d kristal... (%s)", count, reason), 4)
+
+    -- 1. Kirim remote Drop per kristal (jika tersedia)
+    if remotes.drop then
+        for _, crystal in ipairs(crystals) do
+            pcall(function()
+                if remotes.drop:IsA("RemoteEvent") then
+                    remotes.drop:FireServer(crystal)
+                elseif remotes.drop:IsA("RemoteFunction") then
+                    remotes.drop:InvokeServer(crystal)
+                end
+            end)
+            task.wait(0.02)
+        end
+        notify_("Drop remote dikirim untuk " .. count .. " kristal.", 3)
+    end
+
+    -- 2. Fallback: SellRequest "all"
+    if Config.FallbackToSell and remotes.sell then
+        pcall(function()
+            if remotes.sell:IsA("RemoteEvent") then
+                remotes.sell:FireServer("all")
+            end
+        end)
+        notify_("SellRequest fallback dikirim.", 2)
+    end
+
+    -- 3. Unequip lokal agar tool terlepas dari karakter
+    if Config.UnequipOnDrop then
+        local character = LocalPlayer.Character
+        local humanoid  = character and character:FindFirstChildOfClass("Humanoid")
+        if humanoid then
+            pcall(function() humanoid:UnequipTools() end)
+        end
+
+        local bp = LocalPlayer:FindFirstChildOfClass("Backpack")
+        for _, crystal in ipairs(crystals) do
+            pcall(function()
+                if crystal.Parent and crystal.Parent ~= bp and bp then
+                    crystal.Parent = bp
+                end
+            end)
+        end
+    end
+end
+
+-- Wrapper dengan delay kecil (untuk event async)
+local function dropWithDelay(reason)
+    task.delay(Config.DropDelay, function()
+        pcall(performDrop, reason)
+    end)
+end
+
+-- ─── Trigger 1: Karakter dihapus ────────────────────────
+-- CharacterRemoving terjadi saat:
+--   - Disconnect / kick
+--   - Akun login di perangkat lain (server menghapus karakter)
+--   - Teleportasi keluar server
+Connections.charRemoving = LocalPlayer.CharacterRemoving:Connect(function()
+    dropWithDelay("CharacterRemoving (disconnect / login ganda / teleport)")
+end)
+
+-- Reset flag saat karakter baru muncul (respawn normal)
+Connections.charAdded = LocalPlayer.CharacterAdded:Connect(function()
+    task.delay(1.5, function() dropped = false end)
+end)
+
+-- ─── Trigger 2: LocalPlayer keluar dari Players ──────────
+-- Ini terjadi ketika server benar-benar menendang pemain
+Connections.playerRemoving = Players.PlayerRemoving:Connect(function(player)
+    if player == LocalPlayer then
+        dropWithDelay("PlayerRemoving (keluar dari server)")
+    end
+end)
+
+-- ─── Trigger 3: Error message dari GuiService (kicked) ──
+Connections.errorMsg = GuiService.ErrorMessageChanged:Connect(function()
+    local ok, msg = pcall(function() return GuiService:GetErrorMessage() end)
+    if ok and type(msg) == "string" and msg ~= "" then
+        dropWithDelay("Error/Kick: " .. msg:sub(1, 50))
+    end
+end)
+
+-- ─── Trigger 4: RobloxPromptGui ErrorPrompt ─────────────
+pcall(function()
+    local promptGui = CoreGui:FindFirstChild("RobloxPromptGui")
+    local overlay   = promptGui and promptGui:FindFirstChild("promptOverlay")
+    if overlay then
+        Connections.errorPrompt = overlay.ChildAdded:Connect(function(child)
+            if child.Name:find("ErrorPrompt") or child.Name:find("Disconnect") then
+                dropWithDelay("ErrorPrompt: " .. child.Name)
+            end
+        end)
+    end
+end)
+
+-- ─── Trigger 5: TeleportService (sebelum teleport) ──────
+-- Tidak ada event "sebelum teleport" secara resmi, tapi
+-- kita tangkap LocalPlayerArrivedFromTeleport untuk reset flag
+pcall(function()
+    Connections.teleportArrive = TeleportService.LocalPlayerArrivedFromTeleport
+        :Connect(function()
+            task.delay(2, function() dropped = false end)
+        end)
+end)
+
+-- ─── Trigger 6: Heartbeat — cek apakah player masih ada ─
+local hbClock = 0
+Connections.heartbeat = RunService.Heartbeat:Connect(function(dt)
+    hbClock = hbClock + dt
+    if hbClock < Config.HeartbeatCheck then return end
+    hbClock = 0
+
+    if not LocalPlayer.Parent then
+        dropWithDelay("LocalPlayer tidak ada (koneksi putus)")
+    end
+end)
+
+-- ─── Trigger 7: Input manual untuk testing ──────────────
+Connections.manualInput = UserInputService.InputBegan:Connect(function(input, processed)
+    if processed then return end
+    if input.KeyCode == Config.ManualDropKey then
+        dropped = false  -- reset agar bisa drop ulang
+        notify_("Drop manual dipicu oleh tombol " .. Config.ManualDropKey.Name, 3)
+        performDrop("Manual / Testing")
+    end
+end)
+
+-- ─── API publik (opsional, untuk integrasi dengan script lain) ───────
+getgenv().AutoDropAPI = {
+    -- Paksa drop sekarang (reset flag otomatis)
+    Drop = function(reason)
+        dropped = false
+        performDrop(reason or "API call")
+    end,
+    -- Cek status
+    HasDropped = function() return dropped end,
+    -- Reset agar bisa drop lagi
+    Reset = function() dropped = false end,
+}
+
+-- ─── Cleanup ─────────────────────────────────────────────
+local function cleanupAll()
+    for key, c in pairs(Connections) do
+        if c then pcall(function() c:Disconnect() end) end
+        Connections[key] = nil
+    end
+    getgenv().AutoDropLoaded = false
+    getgenv().AutoDropUnload = nil
+    getgenv().AutoDropAPI    = nil
+    print("[AutoDropCrystal] Script dibersihkan.")
+end
+
+getgenv().AutoDropUnload = cleanupAll
+
+-- ─── Info startup ────────────────────────────────────────
+local hasDropRemote = findRemote(Config.DropRemoteName) ~= nil
+local hasSellRemote = findRemote(Config.SellRemoteName) ~= nil
+
+notify_(string.format(
+    "AutoDropCrystal aktif!\nManual: %s | Drop Remote: %s | Sell Remote: %s",
+    Config.ManualDropKey.Name,
+    hasDropRemote and "✓" or "✗",
+    hasSellRemote and "✓" or "✗"
+), 6)
