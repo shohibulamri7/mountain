@@ -1,341 +1,176 @@
 --[[
-    AutoDropCrystal.lua  (v2 – simultaneous realtime drop, anti-underground)
-    ════════════════════════════════════════════════════════
-    Perubahan dari v1:
-      • Semua kristal dilempar SERENTAK (task.spawn tiap kristal)
-      • Posisi drop dihitung via Raycast ke bawah → tidak tembus lantai
-      • Scatter horizontal acak agar tidak tumpuk di satu titik
-      • Velocity kecil ke atas + horizontal agar animasi terasa natural
-      • Flag `dropped` per-item (map) sehingga per-crystal lebih presisi
-    ════════════════════════════════════════════════════════
+    DropSemua.lua
+    Tombol 1 klik → keluarkan semua isi tas serentak
+    Anti-underground (raycast lantai), scatter acak, tidak tumpuk
 ]]
 
--- ─── Penjaga double-load ────────────────────────────────
-local getgenv = getgenv or function() return _G end
-if getgenv().AutoDropLoaded then
-    if getgenv().AutoDropUnload then pcall(getgenv().AutoDropUnload) end
-end
-getgenv().AutoDropLoaded = true
+local Players  = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
+local CoreGui  = game:GetService("CoreGui")
 
--- ─── Services ───────────────────────────────────────────
-local Players           = game:GetService("Players")
-local RunService        = game:GetService("RunService")
-local UserInputService  = game:GetService("UserInputService")
-local TeleportService   = game:GetService("TeleportService")
-local GuiService        = game:GetService("GuiService")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local CoreGui           = game:GetService("CoreGui")
-local Workspace         = game:GetService("Workspace")
+local lp       = Players.LocalPlayer
 
-local LocalPlayer       = Players.LocalPlayer
-local Connections       = {}
+-- ══════════════════════════════
+--  FUNGSI UTAMA
+-- ══════════════════════════════
 
--- ─── Konfigurasi ────────────────────────────────────────
-local Config = {
-    RemotesFolder   = "Remotes",
-    DropRemoteName  = "DropCrystal",   -- kosongkan jika tidak ada
-    SellRemoteName  = "SellRequest",   -- fallback
-
-    ManualDropKey   = Enum.KeyCode.F9,
-
-    -- Jarak scatter horizontal kristal (studs)
-    ScatterRadius   = 2.5,
-
-    -- Tinggi lempar awal di atas lantai (studs)
-    DropHeightAbove = 1.5,
-
-    -- Kecepatan lemparan kecil (studs/s)
-    ThrowSpeed      = 6,
-
-    -- Apakah kirim remote ke server juga
-    SendRemote      = true,
-    FallbackToSell  = true,
-
-    DropDelay       = 0.05,
-    HeartbeatCheck  = 1.0,
-}
-
--- ─── Utilitas ───────────────────────────────────────────
-local function notify_(msg, dur)
-    pcall(function()
-        game:GetService("StarterGui"):SetCore("SendNotification", {
-            Title    = "AutoDropCrystal",
-            Text     = tostring(msg),
-            Duration = dur or 3,
-        })
-    end)
-    print("[AutoDropCrystal] " .. tostring(msg))
+local function groundY(pos)
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    local char = lp.Character
+    if char then params.FilterDescendantsInstances = {char} end
+    local hit = Workspace:Raycast(pos + Vector3.new(0, 10, 0), Vector3.new(0, -60, 0), params)
+    return hit and hit.Position.Y or (pos.Y - 3)
 end
 
-local function randomScatter(origin, radius)
-    local angle = math.random() * 2 * math.pi
-    local r     = math.random() * radius
-    return Vector3.new(
-        origin.X + math.cos(angle) * r,
-        origin.Y,
-        origin.Z + math.sin(angle) * r
-    )
-end
+local function dropAll()
+    local char     = lp.Character
+    local backpack = lp:FindFirstChildOfClass("Backpack")
+    local hrp      = char and char:FindFirstChild("HumanoidRootPart")
+    local origin   = hrp and hrp.Position or Vector3.new(0, 5, 0)
 
--- Raycast ke bawah dari `from`, kembalikan posisi lantai atau fallback
-local function groundLevel(from)
-    local ray    = RaycastParams.new()
-    ray.FilterType = Enum.RaycastFilterType.Exclude
+    -- Unequip dulu
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if hum then pcall(function() hum:UnequipTools() end) end
 
-    -- Kecualikan karakter lokal dari raycast
-    local char = LocalPlayer.Character
+    -- Kumpulkan semua Tool dari karakter + backpack
+    local tools = {}
     if char then
-        ray.FilterDescendantsInstances = { char }
+        for _, v in ipairs(char:GetChildren()) do
+            if v:IsA("Tool") then tools[#tools+1] = v end
+        end
     end
-
-    local result = Workspace:Raycast(from, Vector3.new(0, -50, 0), ray)
-    if result then
-        return result.Position.Y
-    end
-    return from.Y - 3  -- fallback jika tidak ada lantai terdeteksi
-end
-
--- ─── Cari remote ────────────────────────────────────────
-local function findRemote(name)
-    if not name or name == "" then return nil end
-    local folder = ReplicatedStorage:FindFirstChild(Config.RemotesFolder)
-              or ReplicatedStorage:WaitForChild(Config.RemotesFolder, 5)
-    if not folder then return nil end
-    return folder:FindFirstChild(name)
-end
-
-local function getRemotes()
-    return {
-        drop = findRemote(Config.DropRemoteName),
-        sell = findRemote(Config.SellRemoteName),
-    }
-end
-
--- ─── Detektor kristal ───────────────────────────────────
-local function getAttr(inst, name)
-    if not inst then return nil end
-    local ok, v = pcall(inst.GetAttribute, inst, name)
-    return ok and v or nil
-end
-
-local function isCrystal(inst)
-    if not inst then return false end
-    if not inst:IsA("Tool") then return false end
-    if getAttr(inst, "Value") ~= nil then return true end
-    if getAttr(inst, "Tier")  ~= nil then return true end
-    if inst.Name:find("Crystal", 1, true) then return true end
-    return false
-end
-
-local function collectCrystals()
-    local list      = {}
-    local character = LocalPlayer.Character
-    local backpack  = LocalPlayer:FindFirstChildOfClass("Backpack")
-
-    local function scan(container)
-        if not container then return end
-        for _, child in ipairs(container:GetChildren()) do
-            if isCrystal(child) then list[#list + 1] = child end
+    if backpack then
+        for _, v in ipairs(backpack:GetChildren()) do
+            if v:IsA("Tool") then tools[#tools+1] = v end
         end
     end
 
-    scan(character)
-    scan(backpack)
-    return list
-end
-
--- ─── Fisika drop satu kristal (anti-underground) ─────────
-local function physDrop(crystal, originCF)
-    -- Pilih posisi scatter di sekitar player
-    local scatterPos = randomScatter(originCF.Position, Config.ScatterRadius)
-
-    -- Cari ketinggian lantai di titik scatter tersebut
-    -- Raycast dari 5 studs di atas titik scatter
-    local floorY     = groundLevel(scatterPos + Vector3.new(0, 5, 0))
-    local spawnPos   = Vector3.new(scatterPos.X, floorY + Config.DropHeightAbove, scatterPos.Z)
-
-    -- Pindahkan tool ke Workspace (keluar dari karakter/backpack)
-    crystal.Parent = Workspace
-
-    -- Cari PrimaryPart atau BasePart pertama di dalam tool
-    local rootPart = crystal.PrimaryPart
-        or crystal:FindFirstChildWhichIsA("BasePart")
-        or crystal:FindFirstChild("Handle")
-
-    if rootPart then
-        -- Teleport ke posisi aman di atas lantai
-        rootPart.CFrame = CFrame.new(spawnPos)
-
-        -- Pastikan tidak anchored
-        rootPart.Anchored = false
-
-        -- Beri impulse kecil agar tidak diam di tempat
-        if rootPart:IsA("BasePart") then
-            local angle  = math.random() * 2 * math.pi
-            rootPart.AssemblyLinearVelocity = Vector3.new(
-                math.cos(angle) * Config.ThrowSpeed,
-                Config.ThrowSpeed * 0.5,   -- sedikit ke atas
-                math.sin(angle) * Config.ThrowSpeed
-            )
-        end
-    end
-end
-
--- ─── Drop utama — semua kristal SERENTAK ─────────────────
-local dropped = false
-
-local function performDrop(reason)
-    if dropped then return end
-    dropped = true
-
-    local remotes  = getRemotes()
-    local crystals = collectCrystals()
-    local count    = #crystals
-
-    if count == 0 then
-        notify_("Tidak ada kristal. (" .. reason .. ")", 3)
+    if #tools == 0 then
+        game:GetService("StarterGui"):SetCore("SendNotification", {
+            Title = "Drop", Text = "Tas kosong!", Duration = 2
+        })
         return
     end
 
-    notify_(string.format("Melepas %d kristal serentak… (%s)", count, reason), 4)
-
-    -- Ambil posisi karakter sekarang sebagai titik acuan
-    local char    = LocalPlayer.Character
-    local hrp     = char and char:FindFirstChild("HumanoidRootPart")
-    local originCF = hrp and hrp.CFrame or CFrame.new(0, 5, 0)
-
-    -- Unequip semua tool lokal dulu (satu kali)
-    local humanoid = char and char:FindFirstChildOfClass("Humanoid")
-    if humanoid then pcall(function() humanoid:UnequipTools() end) end
-
-    -- Loop serentak: tiap kristal di-spawn di goroutine sendiri
-    for _, crystal in ipairs(crystals) do
-        local crRef = crystal   -- closure capture
+    -- Lempar semua serentak
+    for _, tool in ipairs(tools) do
         task.spawn(function()
-            -- 1. Kirim remote ke server (opsional)
-            if Config.SendRemote and remotes.drop then
-                pcall(function()
-                    if remotes.drop:IsA("RemoteEvent") then
-                        remotes.drop:FireServer(crRef)
-                    elseif remotes.drop:IsA("RemoteFunction") then
-                        remotes.drop:InvokeServer(crRef)
-                    end
-                end)
-            end
+            -- Posisi scatter acak di sekitar pemain
+            local angle = math.random() * 2 * math.pi
+            local r     = 1.5 + math.random() * 2.5   -- 1.5–4 studs
+            local sx    = origin.X + math.cos(angle) * r
+            local sz    = origin.Z + math.sin(angle) * r
 
-            -- 2. Drop fisika lokal (anti-underground)
-            pcall(physDrop, crRef, originCF)
-        end)
-    end
+            -- Cari lantai di titik itu
+            local floor = groundY(Vector3.new(sx, origin.Y, sz))
+            local spawnPos = Vector3.new(sx, floor + 1.5, sz)
 
-    -- 3. Fallback sell jika remote drop tidak ada
-    if Config.FallbackToSell and remotes.sell and not remotes.drop then
-        pcall(function()
-            if remotes.sell:IsA("RemoteEvent") then
-                remotes.sell:FireServer("all")
-            end
-        end)
-        notify_("SellRequest fallback dikirim.", 2)
-    end
-end
+            -- Pindahkan ke Workspace
+            tool.Parent = Workspace
 
-local function dropWithDelay(reason)
-    task.delay(Config.DropDelay, function()
-        pcall(performDrop, reason)
-    end)
-end
+            -- Cari BasePart (Handle atau part pertama)
+            local part = tool:FindFirstChild("Handle")
+                      or tool.PrimaryPart
+                      or tool:FindFirstChildWhichIsA("BasePart")
 
--- ─── Trigger 1: CharacterRemoving ────────────────────────
-Connections.charRemoving = LocalPlayer.CharacterRemoving:Connect(function()
-    dropWithDelay("CharacterRemoving (disconnect / login ganda / teleport)")
-end)
-
--- Reset flag saat karakter baru muncul
-Connections.charAdded = LocalPlayer.CharacterAdded:Connect(function()
-    task.delay(1.5, function() dropped = false end)
-end)
-
--- ─── Trigger 2: PlayerRemoving ───────────────────────────
-Connections.playerRemoving = Players.PlayerRemoving:Connect(function(player)
-    if player == LocalPlayer then
-        dropWithDelay("PlayerRemoving")
-    end
-end)
-
--- ─── Trigger 3: GuiService error ─────────────────────────
-Connections.errorMsg = GuiService.ErrorMessageChanged:Connect(function()
-    local ok, msg = pcall(function() return GuiService:GetErrorMessage() end)
-    if ok and type(msg) == "string" and msg ~= "" then
-        dropWithDelay("Error/Kick: " .. msg:sub(1, 50))
-    end
-end)
-
--- ─── Trigger 4: RobloxPromptGui ──────────────────────────
-pcall(function()
-    local promptGui = CoreGui:FindFirstChild("RobloxPromptGui")
-    local overlay   = promptGui and promptGui:FindFirstChild("promptOverlay")
-    if overlay then
-        Connections.errorPrompt = overlay.ChildAdded:Connect(function(child)
-            if child.Name:find("ErrorPrompt") or child.Name:find("Disconnect") then
-                dropWithDelay("ErrorPrompt: " .. child.Name)
+            if part then
+                part.Anchored = false
+                part.CFrame   = CFrame.new(spawnPos)
+                -- Beri sedikit velocity agar tidak diam
+                local va = math.random() * 2 * math.pi
+                part.AssemblyLinearVelocity = Vector3.new(
+                    math.cos(va) * 5,
+                    4,
+                    math.sin(va) * 5
+                )
             end
         end)
     end
-end)
 
--- ─── Trigger 5: TeleportService ──────────────────────────
-pcall(function()
-    Connections.teleportArrive = TeleportService.LocalPlayerArrivedFromTeleport
-        :Connect(function()
-            task.delay(2, function() dropped = false end)
-        end)
-end)
-
--- ─── Trigger 6: Heartbeat — cek LocalPlayer masih ada ────
-local hbClock = 0
-Connections.heartbeat = RunService.Heartbeat:Connect(function(dt)
-    hbClock = hbClock + dt
-    if hbClock < Config.HeartbeatCheck then return end
-    hbClock = 0
-    if not LocalPlayer.Parent then
-        dropWithDelay("LocalPlayer hilang (koneksi putus)")
-    end
-end)
-
--- ─── Trigger 7: Input manual F9 ──────────────────────────
-Connections.manualInput = UserInputService.InputBegan:Connect(function(input, processed)
-    if processed then return end
-    if input.KeyCode == Config.ManualDropKey then
-        dropped = false
-        notify_("Drop manual — " .. Config.ManualDropKey.Name, 3)
-        performDrop("Manual / Testing")
-    end
-end)
-
--- ─── API publik ───────────────────────────────────────────
-getgenv().AutoDropAPI = {
-    Drop     = function(reason) dropped = false; performDrop(reason or "API call") end,
-    HasDropped = function() return dropped end,
-    Reset    = function() dropped = false end,
-}
-
--- ─── Cleanup ─────────────────────────────────────────────
-local function cleanupAll()
-    for key, c in pairs(Connections) do
-        pcall(function() c:Disconnect() end)
-        Connections[key] = nil
-    end
-    getgenv().AutoDropLoaded = false
-    getgenv().AutoDropUnload = nil
-    getgenv().AutoDropAPI    = nil
-    print("[AutoDropCrystal] Script dibersihkan.")
+    game:GetService("StarterGui"):SetCore("SendNotification", {
+        Title = "Drop", Text = #tools .. " item dikeluarkan!", Duration = 2
+    })
 end
-getgenv().AutoDropUnload = cleanupAll
 
--- ─── Startup info ────────────────────────────────────────
-notify_(string.format(
-    "AutoDropCrystal v2 aktif!\nManual: %s | Drop Remote: %s | Sell Remote: %s",
-    Config.ManualDropKey.Name,
-    findRemote(Config.DropRemoteName) ~= nil and "✓" or "✗",
-    findRemote(Config.SellRemoteName) ~= nil and "✓" or "✗"
-), 6)
+-- ══════════════════════════════
+--  BUAT TOMBOL GUI
+-- ══════════════════════════════
+
+-- Hapus GUI lama jika ada
+local old = CoreGui:FindFirstChild("DropSemuaGui")
+if old then old:Destroy() end
+
+local gui = Instance.new("ScreenGui")
+gui.Name           = "DropSemuaGui"
+gui.ResetOnSpawn   = false
+gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+gui.Parent         = CoreGui
+
+-- Frame
+local frame = Instance.new("Frame")
+frame.Size             = UDim2.new(0, 170, 0, 55)
+frame.Position         = UDim2.new(1, -185, 1, -75)   -- kanan bawah
+frame.BackgroundColor3 = Color3.fromRGB(15, 15, 15)
+frame.BorderSizePixel  = 0
+frame.Parent           = gui
+
+Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 12)
+
+local stroke = Instance.new("UIStroke", frame)
+stroke.Color     = Color3.fromRGB(255, 70, 70)
+stroke.Thickness = 2
+
+-- Tombol utama
+local btn = Instance.new("TextButton")
+btn.Size             = UDim2.new(1, -10, 1, -10)
+btn.Position         = UDim2.new(0, 5, 0, 5)
+btn.BackgroundColor3 = Color3.fromRGB(210, 35, 35)
+btn.BorderSizePixel  = 0
+btn.Text             = "🎒  DROP SEMUA"
+btn.TextColor3       = Color3.new(1, 1, 1)
+btn.TextSize         = 17
+btn.Font             = Enum.Font.GothamBold
+btn.AutoButtonColor  = false
+btn.Parent           = frame
+
+Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 8)
+
+-- Hover & klik animasi
+btn.MouseEnter:Connect(function()
+    btn.BackgroundColor3 = Color3.fromRGB(255, 55, 55)
+end)
+btn.MouseLeave:Connect(function()
+    btn.BackgroundColor3 = Color3.fromRGB(210, 35, 35)
+end)
+btn.MouseButton1Down:Connect(function()
+    btn.BackgroundColor3 = Color3.fromRGB(140, 15, 15)
+end)
+btn.MouseButton1Up:Connect(function()
+    btn.BackgroundColor3 = Color3.fromRGB(210, 35, 35)
+end)
+
+-- Aksi klik
+btn.MouseButton1Click:Connect(function()
+    dropAll()
+end)
+
+-- Tombol × (tutup)
+local x = Instance.new("TextButton")
+x.Size             = UDim2.new(0, 18, 0, 18)
+x.Position         = UDim2.new(1, -20, 0, 2)
+x.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+x.BorderSizePixel  = 0
+x.Text             = "×"
+x.TextColor3       = Color3.new(1, 1, 1)
+x.TextSize         = 13
+x.Font             = Enum.Font.GothamBold
+x.ZIndex           = 5
+x.Parent           = frame
+Instance.new("UICorner", x).CornerRadius = UDim.new(1, 0)
+
+x.MouseButton1Click:Connect(function()
+    gui:Destroy()
+end)
+
+print("[DropSemua] Tombol aktif — klik 'DROP SEMUA' di kanan bawah layar.")
