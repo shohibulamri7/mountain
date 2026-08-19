@@ -1,579 +1,418 @@
--- ═══════════════════════════════════════════════════════════════
---  DROP / EJECT CRYSTAL MODULE  v2 – SERVER-SIDE FIX
---  Paste di bawah script utama (dalam executor yang sama)
---
---  Kenapa v1 gagal:
---    tool.Parent = Workspace  → hanya client-side, tidak terkirim ke server.
---    Pemain lain / device lain tidak melihat kristal jatuh.
---
---  v2 menggunakan metode server-side:
---    1. Scan otomatis semua RemoteEvent/RemoteFunction drop di game
---    2. VirtualInputManager simulasi tombol Backspace (Roblox native drop)
---       → Roblox CoreScript menangani ini di SERVER, semua client melihat
---    3. Equip tool via humanoid → fire "DropTool" CoreScript event
---    4. SellRequest sebagai fallback terakhir
--- ═══════════════════════════════════════════════════════════════
+-- ═══════════════════════════════════════════════
+--  CRYSTAL DROPPER – Standalone, execute sendiri
+--  Tidak butuh script utama. Drop = Equip + Backspace
+-- ═══════════════════════════════════════════════
 
-do
-    -- ─── Services ───
-    local Players         = game:GetService("Players")
-    local RunService      = game:GetService("RunService")
-    local UserInputService= game:GetService("UserInputService")
-    local ReplicatedStorage=game:GetService("ReplicatedStorage")
-    local LocalPlayer     = Players.LocalPlayer
+local LP  = game:GetService("Players").LocalPlayer
+local UIS = game:GetService("UserInputService")
 
-    -- ─── Coba dapatkan VirtualInputManager (executor harus support) ───
-    local VIM
-    pcall(function() VIM = game:GetService("VirtualInputManager") end)
+-- VirtualInputManager untuk simulasi Backspace server-side
+local VIM
+pcall(function() VIM = game:GetService("VirtualInputManager") end)
 
-    -- ─── Helper attr aman ───
-    local function safeAttr(inst, name)
-        if not inst then return nil end
-        local ok, v = pcall(inst.GetAttribute, inst, name)
-        return ok and v or nil
-    end
+-- ── Attr helper ──
+local function attr(inst, name)
+    if not inst then return nil end
+    local ok, v = pcall(inst.GetAttribute, inst, name)
+    return ok and v or nil
+end
 
-    local function crVal(t)    return tonumber(safeAttr(t,"Value"))    or 0 end
-    local function crTier(t)   return tonumber(safeAttr(t,"Tier"))     or 0 end
-    local function crName(t)
-        local n = safeAttr(t,"CrystalName")
-        return (type(n)=="string" and n~="") and n or (t and t.Name) or "?"
-    end
-    local function crMutation(t)
-        local m = safeAttr(t,"Mutation")
-        return (type(m)=="string" and m~="" and m~="None") and m or nil
-    end
+local function crVal(t)  return tonumber(attr(t,"Value"))    or 0 end
+local function crTier(t) return tonumber(attr(t,"Tier"))     or 0 end
+local function crMut(t)
+    local m = attr(t,"Mutation")
+    return type(m)=="string" and m~="" and m~="None"
+end
+local function crName(t)
+    local n = attr(t,"CrystalName")
+    return (type(n)=="string" and n~="") and n or t.Name
+end
 
-    -- Format singkat angka
-    local SFX = {"","k","M","B","T","Qa"}
-    local function fmt(n)
-        n=tonumber(n) or 0
-        local s=n<0 and "-" or ""; n=math.abs(n)
-        if n<1000 then return s..math.floor(n+0.5) end
-        local i=0
-        while n>=1000 and i<#SFX-1 do n=n/1000; i=i+1 end
-        return string.format("%s%.2f%s",s,n,SFX[i+1])
-    end
+-- Format angka singkat
+local function fmt(n)
+    n = tonumber(n) or 0
+    if n >= 1e12 then return string.format("%.1fT",n/1e12)
+    elseif n >= 1e9  then return string.format("%.1fB",n/1e9)
+    elseif n >= 1e6  then return string.format("%.1fM",n/1e6)
+    elseif n >= 1e3  then return string.format("%.1fk",n/1e3)
+    else return tostring(math.floor(n)) end
+end
 
-    local PMUL={k=1e3,m=1e6,b=1e9,t=1e12,qa=1e15}
-    local function parseVal(text)
-        if type(text)~="string" then return nil end
-        local s=text:lower():gsub("[%s,%$_]","")
-        local num,suf=s:match("^(%d*%.?%d+)(%a*)$")
-        if not num then return nil end
-        local base=tonumber(num); if not base then return nil end
-        if suf=="" then return base end
-        return base*(PMUL[suf] or 1)
-    end
+-- Parse "2m" → 2000000
+local function parse(s)
+    if type(s)~="string" then return nil end
+    s = s:lower():gsub("[%s,$]","")
+    local n,sf = s:match("^(%d*%.?%d+)(%a*)$")
+    if not n then return nil end
+    n = tonumber(n)
+    local mul = {k=1e3,m=1e6,b=1e9,t=1e12}
+    return n * (mul[sf] or 1)
+end
 
-    -- ─────────────────────────────────────────────────────────────
-    --  SCAN OTOMATIS: cari remote drop di seluruh ReplicatedStorage
-    -- ─────────────────────────────────────────────────────────────
-    local DROP_KEYWORDS = {
-        "drop","throw","eject","toss","remove","discard","delete"
-    }
-    local foundDropRemote = nil
-
-    local function scanForDropRemote(folder)
-        if not folder then return nil end
-        for _, child in ipairs(folder:GetDescendants()) do
-            if child:IsA("RemoteEvent") or child:IsA("RemoteFunction") then
-                local nl = child.Name:lower()
-                for _, kw in ipairs(DROP_KEYWORDS) do
-                    if nl:find(kw,1,true) then
-                        return child
-                    end
-                end
+-- ── Scan kristal di inventory ──
+local function getInventory()
+    local list = {}
+    local function scan(c)
+        if not c then return end
+        for _, t in ipairs(c:GetChildren()) do
+            if t:IsA("Tool") and attr(t,"Tier") ~= nil then
+                list[#list+1] = t
             end
         end
-        return nil
     end
+    scan(LP:FindFirstChildOfClass("Backpack"))
+    scan(LP.Character)
+    return list
+end
 
-    foundDropRemote = scanForDropRemote(ReplicatedStorage)
+-- ── Drop satu tool: equip → Backspace ──
+local function dropOne(tool)
+    local char = LP.Character
+    local hum  = char and char:FindFirstChildOfClass("Humanoid")
+    if not hum then return false end
 
-    -- Referensi SellRequest dari script utama (jika ada)
-    local sellRemote
-    pcall(function()
-        local folder = ReplicatedStorage:FindFirstChild("Remotes")
-                    or ReplicatedStorage:FindFirstChild("RemoteEvents")
-        if folder then
-            sellRemote = folder:FindFirstChild("SellRequest")
-        end
-    end)
+    -- Equip
+    local ok = pcall(hum.EquipTool, hum, tool)
+    if not ok then return false end
+    task.wait(0.06)
 
-    -- ─────────────────────────────────────────────────────────────
-    --  METODE DROP (prioritas dari paling server-side)
-    -- ─────────────────────────────────────────────────────────────
-
-    -- Metode A: Remote resmi game (jika ditemukan scan)
-    local function tryRemoteDrop(tool)
-        if not foundDropRemote then return false end
-        local ok = pcall(function()
-            if foundDropRemote:IsA("RemoteEvent") then
-                foundDropRemote:FireServer(tool)
-            elseif foundDropRemote:IsA("RemoteFunction") then
-                foundDropRemote:InvokeServer(tool)
-            end
-        end)
-        return ok
-    end
-
-    -- Metode B: VirtualInputManager – simulasi Backspace
-    --   Roblox CoreScript mendengar InputBegan Backspace pada tool yang dipegang
-    --   dan mengirim DropTool ke server → TERLIHAT SEMUA CLIENT
-    local function tryVIMDrop(tool)
-        if not VIM then return false end
-        local character = LocalPlayer.Character
-        local humanoid  = character and character:FindFirstChildOfClass("Humanoid")
-        if not character or not humanoid then return false end
-
-        -- Pastikan tool di-equip dulu
-        local alreadyHeld = tool:IsDescendantOf(character)
-        if not alreadyHeld then
-            -- Pindah ke character (equip)
-            local ok = pcall(function() humanoid:EquipTool(tool) end)
-            if not ok then return false end
-            task.wait(0.07)  -- tunggu animasi equip
-        end
-
-        -- Periksa lagi tool masih ada
-        if not tool or not tool.Parent then return false end
-
-        -- Simulasi Backspace → Roblox native drop (server-side)
-        local dropped = false
-        local ok = pcall(function()
+    -- Backspace via VirtualInputManager (server-side, terlihat semua player)
+    if VIM then
+        pcall(function()
             VIM:SendKeyEvent(true,  Enum.KeyCode.Backspace, false, game)
             task.wait(0.03)
             VIM:SendKeyEvent(false, Enum.KeyCode.Backspace, false, game)
-            dropped = true
         end)
-        task.wait(0.05)
-        return ok and dropped
-    end
-
-    -- Metode C: Trigger DropTool via CoreGui RemoteEvent (internal Roblox)
-    --   Beberapa executor mengekspos channel ini
-    local function tryCoreScriptDrop(tool)
-        local character = LocalPlayer.Character
-        local humanoid  = character and character:FindFirstChildOfClass("Humanoid")
-        if not character or not humanoid then return false end
-
-        -- Equip dulu jika belum
-        if not tool:IsDescendantOf(character) then
-            pcall(function() humanoid:EquipTool(tool) end)
-            task.wait(0.07)
-        end
-        if not tool or not tool.Parent then return false end
-
-        -- Coba fire event internal Roblox "DropTool"
-        local ok = false
-        pcall(function()
-            -- StarterGui -> CoreGui pipeline (beberapa executor allow ini)
-            local StarterGui = game:GetService("StarterGui")
-            StarterGui:SetCore("PromptSendFriendRequest", LocalPlayer) -- dummy call untuk wake CoreScript
-        end)
-
-        -- Fallback: gunakan UserInputService simulate (beberapa exploit support)
-        pcall(function()
-            local fakeInput = {
-                KeyCode        = Enum.KeyCode.Backspace,
-                UserInputType  = Enum.UserInputType.Keyboard,
-                IsModifierKeyDown = function() return false end,
-            }
-            -- Fire melalui signal internal
-            UserInputService.InputBegan:Fire(fakeInput, false)
-            task.wait(0.03)
-            UserInputService.InputEnded:Fire(fakeInput, false)
-            ok = true
-        end)
-        return ok
-    end
-
-    -- Metode D: SellRequest dengan quantity 1 (sebagai fallback – kristal hilang, uang dapat 0)
-    --   Ini server-side tapi kristal dijual bukan dibuang ke dunia
-    local function trySellOneDrop(tool)
-        if not sellRemote then return false end
-        -- Hanya gunakan jika benar-benar tidak ada metode lain
-        -- Kristal akan hilang dari server (efek sama: keluar dari inventory)
-        local ok = pcall(function()
-            if sellRemote:IsA("RemoteEvent") then
-                sellRemote:FireServer(tool)
-            elseif sellRemote:IsA("RemoteFunction") then
-                sellRemote:InvokeServer(tool)
-            end
-        end)
-        return ok
-    end
-
-    -- ─── Pemilih metode terbaik ───
-    local activeMethod = "auto"  -- "vim" | "remote" | "sell" | "auto"
-    local methodLog    = {}
-
-    local function dropTool(tool)
-        if not tool or not tool.Parent then return false end
-
-        local method = activeMethod
-
-        -- AUTO: coba berurutan dari paling baik
-        if method == "auto" then
-            -- 1. Remote resmi
-            if tryRemoteDrop(tool) then
-                methodLog[#methodLog+1] = "remote"; return true
-            end
-            -- 2. VirtualInputManager (Backspace)
-            if tryVIMDrop(tool) then
-                methodLog[#methodLog+1] = "vim"; return true
-            end
-            -- 3. CoreScript trigger
-            if tryCoreScriptDrop(tool) then
-                methodLog[#methodLog+1] = "core"; return true
-            end
-            -- 4. SellRequest (fallback – bukan drop fisik, tapi hilang dari server)
-            if trySellOneDrop(tool) then
-                methodLog[#methodLog+1] = "sell"; return true
-            end
-            return false
-        end
-
-        if method == "vim"    then return tryVIMDrop(tool)       end
-        if method == "remote" then return tryRemoteDrop(tool)    end
-        if method == "sell"   then return trySellOneDrop(tool)   end
-
-        return false
-    end
-
-    -- ─────────────────────────────────────────────────────────────
-    --  Scan inventory kristal
-    -- ─────────────────────────────────────────────────────────────
-    local function scanInventory()
-        local list = {}
-        local function push(container)
-            if not container then return end
-            for _, tool in ipairs(container:GetChildren()) do
-                if tool:IsA("Tool") and safeAttr(tool,"Tier") ~= nil then
-                    list[#list+1] = tool
-                end
-            end
-        end
-        push(LocalPlayer:FindFirstChildOfClass("Backpack"))
-        push(LocalPlayer.Character)
-        return list
-    end
-
-    -- ─────────────────────────────────────────────────────────────
-    --  State & Filter
-    -- ─────────────────────────────────────────────────────────────
-    local DS = {
-        active       = false,
-        minValue     = 0,
-        maxValue     = 500000,
-        tierMin      = 0,
-        tierMax      = 6,
-        mutOnly      = false,
-        excludeMut   = true,
-        dropDelay    = 0.12,   -- lebih lambat agar server tidak throttle
-        previewList  = {},
-        loopActive   = false,
-        droppedTotal = 0,
-        statusText   = "Diam",
-    }
-
-    local function passesFilter(tool)
-        local val  = crVal(tool)
-        local tier = crTier(tool)
-        local mut  = crMutation(tool)
-        if val  < DS.minValue  then return false end
-        if val  > DS.maxValue  then return false end
-        if tier < DS.tierMin   then return false end
-        if tier > DS.tierMax   then return false end
-        if DS.mutOnly    and not mut then return false end
-        if DS.excludeMut and     mut then return false end
         return true
     end
 
-    local function buildDropList()
-        local all  = scanInventory()
-        local list = {}
-        for _, tool in ipairs(all) do
-            if passesFilter(tool) then list[#list+1] = tool end
-        end
-        table.sort(list, function(a,b) return crVal(a) < crVal(b) end)
-        return list
-    end
-
-    -- ─────────────────────────────────────────────────────────────
-    --  Eksekusi drop
-    -- ─────────────────────────────────────────────────────────────
-    local function doDropAll(list, onDone)
-        if #list == 0 then
-            DS.statusText = "Tidak ada kristal yang memenuhi filter"
-            if onDone then onDone(0) end; return
-        end
-        task.spawn(function()
-            local count = 0
-            for _, tool in ipairs(list) do
-                if not DS.active and not DS.loopActive then break end
-                if tool and tool.Parent then
-                    local ok = dropTool(tool)
-                    if ok then
-                        count           = count + 1
-                        DS.droppedTotal = DS.droppedTotal + 1
-                        DS.statusText   = string.format(
-                            "Membuang %d/%d – %s ($%s)",
-                            count, #list, crName(tool), fmt(crVal(tool))
-                        )
-                    else
-                        DS.statusText = string.format(
-                            "Gagal: %s – coba metode lain", crName(tool)
-                        )
-                    end
-                    task.wait(DS.dropDelay)
-                end
-            end
-            DS.statusText = string.format(
-                "Selesai! %d dari %d kristal berhasil dibuang (total: %d)",
-                count, #list, DS.droppedTotal
-            )
-            if onDone then onDone(count) end
-        end)
-    end
-
-    -- ─────────────────────────────────────────────────────────────
-    --  UI
-    -- ─────────────────────────────────────────────────────────────
-    if not Library then
-        warn("[DropModule v2] Library tidak ditemukan – jalankan setelah script utama!")
-        return
-    end
-
-    local dropTab = (Tabs and Tabs.farming) or Window:AddTab("Buang Kristal", "trash-2")
-
-    -- ══ Groupbox kiri: Filter & Eksekusi ══
-    local DropBox = dropTab:AddLeftGroupbox("Buang Kristal dari Tas [v2]", "trash-2")
-
-    -- Info metode yang terdeteksi
-    local remoteInfo = foundDropRemote
-        and ("Remote: " .. foundDropRemote.Name)
-        or  "Remote drop tidak ditemukan (pakai VIM/Backspace)"
-    DropBox:AddLabel(remoteInfo, true)
-    DropBox:AddLabel("VIM (Backspace) = server-side, terlihat semua pemain", true)
-    DropBox:AddDivider()
-
-    -- Pilih metode
-    DropBox:AddDropdown("DropMethod", {
-        Text   = "Metode Drop",
-        Values = { "auto", "vim", "remote", "sell" },
-        Default = "auto",
-        Callback = function(val) activeMethod = val end,
-    })
-    DropBox:AddLabel("auto = coba semua urutan | sell = hapus dari inventory (jual 0)", true)
-    DropBox:AddDivider()
-
-    -- Filter nilai
-    DropBox:AddInput("DropMinVal", {
-        Text = "Nilai Min yang Dibuang",
-        Default = "0", Placeholder = "0",
-        Numeric = false, Finished = false,
-        Callback = function(t) DS.minValue = parseVal(t) or 0 end,
-    })
-    DropBox:AddInput("DropMaxVal", {
-        Text = "Nilai Max yang Dibuang",
-        Default = "500k", Placeholder = "500k / 2m / 1.5b",
-        Numeric = false, Finished = false,
-        Callback = function(t) DS.maxValue = parseVal(t) or math.huge end,
-    })
-    DropBox:AddDivider()
-
-    -- Filter tier
-    DropBox:AddSlider("DropTierMin", {
-        Text = "Tier Min", Default = 0, Min = 0, Max = 6, Rounding = 0,
-        Callback = function(v) DS.tierMin = v end,
-    })
-    DropBox:AddSlider("DropTierMax", {
-        Text = "Tier Max", Default = 6, Min = 0, Max = 6, Rounding = 0,
-        Callback = function(v) DS.tierMax = v end,
-    })
-    DropBox:AddDivider()
-
-    -- Proteksi mutasi
-    DropBox:AddToggle("DropProtectMut", {
-        Text = "Lindungi Kristal Bermutasi",
-        Default = true,
-        Callback = function(v)
-            DS.excludeMut = v
-            if v then DS.mutOnly = false end
-        end,
-    })
-    DropBox:AddToggle("DropMutOnly", {
-        Text = "Hanya Buang Kristal Bermutasi",
-        Default = false,
-        Callback = function(v)
-            DS.mutOnly = v
-            if v then DS.excludeMut = false end
-        end,
-    })
-    DropBox:AddDivider()
-
-    -- Kecepatan (lebih lambat = aman untuk server)
-    DropBox:AddSlider("DropDelay", {
-        Text    = "Jeda antar drop (ms)",
-        Default = 12,   -- 120ms default (aman)
-        Min     = 5,    -- 50ms minimum
-        Max     = 200,  -- 2000ms
-        Rounding = 0,
-        Suffix  = "0ms",
-        Callback = function(v) DS.dropDelay = v / 100 end,
-    })
-    DropBox:AddLabel("Lebih lambat = lebih aman (server tidak nge-kick)", true)
-    DropBox:AddDivider()
-
-    -- Preview & Eksekusi
-    local PreviewLabel = DropBox:AddLabel("Preview: –", true)
-
-    DropBox:AddButton("Pratinjau Daftar Drop", function()
-        local list = buildDropList()
-        if #list == 0 then
-            PreviewLabel:SetText("Preview: tidak ada yang memenuhi filter")
-            Library:Notify("Tidak ada kristal yang memenuhi filter!", 3); return
-        end
-        local total = 0
-        for _, t in ipairs(list) do total = total + crVal(t) end
-        local txt = string.format("Preview: %d kristal | total $%s", #list, fmt(total))
-        PreviewLabel:SetText(txt)
-        Library:Notify(txt, 4)
-        DS.previewList = list
+    -- Fallback: simulasi keydown via UIS (beberapa executor support)
+    pcall(function()
+        local f = Instance.new("InputObject")
+        f.KeyCode       = Enum.KeyCode.Backspace
+        f.UserInputType = Enum.UserInputType.Keyboard
+        f.UserInputState= Enum.UserInputState.Begin
+        UIS.InputBegan:Fire(f, false)
+        task.wait(0.03)
+        f.UserInputState = Enum.UserInputState.End
+        UIS.InputEnded:Fire(f, false)
     end)
-
-    DropBox:AddButton("Buang Hasil Pratinjau", function()
-        local list = DS.previewList
-        if not list or #list == 0 then
-            Library:Notify("Lakukan Pratinjau dulu!", 2); return
-        end
-        DS.active = true
-        doDropAll(list, function(n)
-            DS.active = false; DS.previewList = {}
-            Library:Notify(string.format("Selesai! %d kristal dibuang", n), 3)
-        end)
-    end)
-
-    DropBox:AddButton("BUANG SEKARANG (pakai filter aktif)", function()
-        local list = buildDropList()
-        if #list == 0 then
-            Library:Notify("Tidak ada kristal yang memenuhi filter!", 3); return
-        end
-        Library:Notify(string.format("Membuang %d kristal...", #list), 2)
-        DS.active = true
-        doDropAll(list, function(n)
-            DS.active = false
-            Library:Notify(string.format("Selesai! %d kristal dibuang", n), 3)
-        end)
-    end)
-
-    -- ══ Groupbox kanan: Auto & Preset ══
-    local AutoBox = dropTab:AddRightGroupbox("Auto Buang & Preset Cepat", "refresh-cw")
-
-    AutoBox:AddLabel("Auto buang kristal sesuai filter secara berkala", true)
-    AutoBox:AddDivider()
-
-    local loopSec = 5.0
-    AutoBox:AddSlider("DropLoopSec", {
-        Text = "Interval Auto (detik)",
-        Default = 50, Min = 10, Max = 300, Rounding = 0, Suffix = "0ms",
-        Callback = function(v) loopSec = v / 10 end,
-    })
-
-    local AutoLbl  = AutoBox:AddLabel("Auto: nonaktif", true)
-    local TotalLbl = AutoBox:AddLabel("Total dibuang: 0", true)
-
-    local loopBusy = false
-    AutoBox:AddToggle("DropLoopOn", {
-        Text = "Auto Buang Loop",
-        Default = false,
-        Callback = function(v)
-            DS.loopActive = v
-            if not v then loopBusy = false; AutoLbl:SetText("Auto: nonaktif") end
-        end,
-    })
-
-    AutoBox:AddDivider()
-    AutoBox:AddLabel("── Preset Satu-Klik (Non-Mutasi) ──", true)
-
-    local function preset(minV, maxV)
-        local saved = { DS.minValue, DS.maxValue, DS.excludeMut, DS.mutOnly }
-        DS.minValue = minV; DS.maxValue = maxV
-        DS.excludeMut = true; DS.mutOnly = false
-        local list = buildDropList()
-        DS.minValue = saved[1]; DS.maxValue = saved[2]
-        DS.excludeMut = saved[3]; DS.mutOnly = saved[4]
-        if #list == 0 then Library:Notify("Tidak ada kristal preset!", 2); return end
-        Library:Notify(string.format("Membuang %d kristal...", #list), 2)
-        DS.active = true
-        doDropAll(list, function(n)
-            DS.active = false
-            Library:Notify(string.format("Preset selesai! %d dibuang", n), 3)
-        end)
-    end
-
-    AutoBox:AddButton("Buang < 100k", function() preset(0, 100000) end)
-    AutoBox:AddButton("Buang < 500k", function() preset(0, 500000) end)
-    AutoBox:AddButton("Buang < 1M",   function() preset(0, 1000000) end)
-    AutoBox:AddButton("Buang < 5M",   function() preset(0, 5000000) end)
-    AutoBox:AddButton("Buang < 50M",  function() preset(0, 50000000) end)
-    AutoBox:AddDivider()
-
-    AutoBox:AddButton("[BAHAYA] Buang SEMUA Kristal", function()
-        local all = scanInventory()
-        if #all == 0 then Library:Notify("Tas kosong", 2); return end
-        Library:Notify(string.format("MEMBUANG SEMUA %d kristal!", #all), 4)
-        DS.active = true
-        doDropAll(all, function(n)
-            DS.active = false
-            Library:Notify(string.format("Buang semua selesai! %d kristal", n), 3)
-        end)
-    end)
-
-    AutoBox:AddDivider()
-
-    -- Status label modul
-    local ModStatusLbl = AutoBox:AddLabel("Diam", true)
-
-    -- ── Heartbeat: loop + update label ──
-    local uiTick  = 0
-    local loopWait = 0
-
-    local dropConn = RunService.Heartbeat:Connect(function(dt)
-        uiTick   = uiTick   + dt
-        loopWait = loopWait + dt
-
-        if uiTick >= 0.4 then
-            uiTick = 0
-            AutoLbl:SetText(DS.loopActive
-                and string.format("Auto: aktif | setiap %.1fs", loopSec)
-                or  "Auto: nonaktif")
-            TotalLbl:SetText("Total dibuang: " .. DS.droppedTotal)
-            ModStatusLbl:SetText(DS.statusText)
-        end
-
-        if DS.loopActive and not loopBusy and loopWait >= loopSec then
-            loopWait = 0; loopBusy = true
-            local list = buildDropList()
-            if #list > 0 then
-                doDropAll(list, function() loopBusy = false end)
-            else
-                loopBusy = false
-            end
-        end
-    end)
-
-    if Connections then Connections.dropConn = dropConn end
-
-    -- Info diagnostik saat muat
-    local hasVIM = VIM ~= nil
-    local hasSell = sellRemote ~= nil
-    Library:Notify(string.format(
-        "Drop Module v2 dimuat!\nRemote: %s | VIM: %s | Sell: %s",
-        foundDropRemote and foundDropRemote.Name or "tidak ada",
-        tostring(hasVIM),
-        tostring(hasSell)
-    ), 5)
+    return true
 end
+
+-- ── Drop semua yang sesuai filter ──
+local dropping = false
+
+local function dropAll(maxVal, protectMut, delay, onStatus)
+    if dropping then return end
+    dropping = true
+
+    local all = getInventory()
+    -- Filter
+    local list = {}
+    for _, t in ipairs(all) do
+        local v = crVal(t)
+        if v <= maxVal then
+            if protectMut and crMut(t) then
+                -- skip
+            else
+                list[#list+1] = t
+            end
+        end
+    end
+
+    -- Sort: nilai terkecil dulu
+    table.sort(list, function(a,b) return crVal(a) < crVal(b) end)
+
+    local count = 0
+    for i, tool in ipairs(list) do
+        if not dropping then break end
+        if tool and tool.Parent then
+            if onStatus then onStatus(string.format("Drop %d/%d  %s ($%s)", i, #list, crName(tool), fmt(crVal(tool)))) end
+            dropOne(tool)
+            count = count + 1
+            task.wait(delay)
+        end
+    end
+
+    dropping = false
+    if onStatus then onStatus(string.format("Selesai! %d kristal di-drop", count)) end
+    return count
+end
+
+-- ════════════════════════════════════════
+--  UI SEDERHANA (ScreenGui sendiri)
+-- ════════════════════════════════════════
+
+-- Hapus GUI lama jika ada
+local function getRoot()
+    local ok, h = pcall(function() return gethui() end)
+    if ok and typeof(h)=="Instance" then return h end
+    return LP:FindFirstChildOfClass("PlayerGui") or game:GetService("CoreGui")
+end
+
+local guiRoot = getRoot()
+local oldGui  = guiRoot:FindFirstChild("CrystalDropper")
+if oldGui then oldGui:Destroy() end
+
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name            = "CrystalDropper"
+ScreenGui.ResetOnSpawn    = false
+ScreenGui.ZIndexBehavior  = Enum.ZIndexBehavior.Sibling
+ScreenGui.DisplayOrder    = 999
+ScreenGui.IgnoreGuiInset  = true
+ScreenGui.Parent          = guiRoot
+
+-- Frame utama
+local Main = Instance.new("Frame")
+Main.Name              = "Main"
+Main.Size              = UDim2.new(0, 320, 0, 400)
+Main.Position          = UDim2.new(0.5, -160, 0.5, -200)
+Main.BackgroundColor3  = Color3.fromRGB(20, 20, 28)
+Main.BorderSizePixel   = 0
+Main.Active            = true
+Main.Draggable         = true
+Main.Parent            = ScreenGui
+
+Instance.new("UICorner", Main).CornerRadius = UDim.new(0, 10)
+
+-- Stroke
+local stroke = Instance.new("UIStroke", Main)
+stroke.Color     = Color3.fromRGB(0, 200, 255)
+stroke.Thickness = 1.5
+
+-- Title bar
+local TitleBar = Instance.new("Frame")
+TitleBar.Size             = UDim2.new(1, 0, 0, 36)
+TitleBar.BackgroundColor3 = Color3.fromRGB(0, 150, 220)
+TitleBar.BorderSizePixel  = 0
+TitleBar.Parent           = Main
+Instance.new("UICorner", TitleBar).CornerRadius = UDim.new(0, 10)
+
+-- Fix sudut bawah titlebar
+local Fix = Instance.new("Frame")
+Fix.Size             = UDim2.new(1, 0, 0.5, 0)
+Fix.AnchorPoint      = Vector2.new(0, 1)
+Fix.Position         = UDim2.new(0, 0, 1, 0)
+Fix.BackgroundColor3 = Color3.fromRGB(0, 150, 220)
+Fix.BorderSizePixel  = 0
+Fix.Parent           = TitleBar
+
+local Title = Instance.new("TextLabel")
+Title.Size              = UDim2.new(1, -40, 1, 0)
+Title.Position          = UDim2.new(0, 12, 0, 0)
+Title.BackgroundTransparency = 1
+Title.Text              = "Crystal Dropper"
+Title.TextColor3        = Color3.new(1,1,1)
+Title.Font              = Enum.Font.GothamBold
+Title.TextSize          = 15
+Title.TextXAlignment    = Enum.TextXAlignment.Left
+Title.Parent            = TitleBar
+
+-- Tombol tutup
+local CloseBtn = Instance.new("TextButton")
+CloseBtn.Size             = UDim2.new(0, 30, 0, 30)
+CloseBtn.Position         = UDim2.new(1, -33, 0, 3)
+CloseBtn.BackgroundColor3 = Color3.fromRGB(220, 50, 50)
+CloseBtn.Text             = "✕"
+CloseBtn.TextColor3       = Color3.new(1,1,1)
+CloseBtn.Font             = Enum.Font.GothamBold
+CloseBtn.TextSize         = 14
+CloseBtn.BorderSizePixel  = 0
+CloseBtn.Parent           = TitleBar
+Instance.new("UICorner", CloseBtn).CornerRadius = UDim.new(0, 6)
+CloseBtn.MouseButton1Click:Connect(function() ScreenGui:Destroy() end)
+
+-- Container isi
+local Content = Instance.new("Frame")
+Content.Size             = UDim2.new(1, -16, 1, -48)
+Content.Position         = UDim2.new(0, 8, 0, 42)
+Content.BackgroundTransparency = 1
+Content.Parent           = Main
+
+local Layout = Instance.new("UIListLayout")
+Layout.SortOrder    = Enum.SortOrder.LayoutOrder
+Layout.Padding      = UDim.new(0, 6)
+Layout.Parent       = Content
+
+-- Helper buat label
+local function mkLabel(text, order)
+    local l = Instance.new("TextLabel")
+    l.LayoutOrder        = order
+    l.Size               = UDim2.new(1, 0, 0, 18)
+    l.BackgroundTransparency = 1
+    l.Text               = text
+    l.TextColor3         = Color3.fromRGB(180, 180, 200)
+    l.Font               = Enum.Font.Gotham
+    l.TextSize           = 12
+    l.TextXAlignment     = Enum.TextXAlignment.Left
+    l.Parent             = Content
+    return l
+end
+
+-- Helper buat input
+local function mkInput(label, default, order)
+    local wrap = Instance.new("Frame")
+    wrap.LayoutOrder        = order
+    wrap.Size               = UDim2.new(1, 0, 0, 32)
+    wrap.BackgroundColor3   = Color3.fromRGB(30, 30, 42)
+    wrap.BorderSizePixel    = 0
+    wrap.Parent             = Content
+    Instance.new("UICorner", wrap).CornerRadius = UDim.new(0, 6)
+
+    local lbl = Instance.new("TextLabel")
+    lbl.Size              = UDim2.new(0, 110, 1, 0)
+    lbl.BackgroundTransparency = 1
+    lbl.Text              = label
+    lbl.TextColor3        = Color3.fromRGB(160, 160, 180)
+    lbl.Font              = Enum.Font.Gotham
+    lbl.TextSize          = 12
+    lbl.TextXAlignment    = Enum.TextXAlignment.Left
+    lbl.Position          = UDim2.new(0, 8, 0, 0)
+    lbl.Parent            = wrap
+
+    local box = Instance.new("TextBox")
+    box.Size              = UDim2.new(1, -120, 0, 24)
+    box.Position          = UDim2.new(0, 116, 0.5, -12)
+    box.BackgroundColor3  = Color3.fromRGB(40, 40, 56)
+    box.Text              = default
+    box.TextColor3        = Color3.new(1,1,1)
+    box.Font              = Enum.Font.Gotham
+    box.TextSize          = 13
+    box.ClearTextOnFocus  = false
+    box.BorderSizePixel   = 0
+    box.Parent            = wrap
+    Instance.new("UICorner", box).CornerRadius = UDim.new(0, 4)
+    return box
+end
+
+-- Helper buat toggle
+local function mkToggle(text, default, order, onChange)
+    local wrap = Instance.new("Frame")
+    wrap.LayoutOrder       = order
+    wrap.Size              = UDim2.new(1, 0, 0, 28)
+    wrap.BackgroundTransparency = 1
+    wrap.Parent            = Content
+
+    local btn = Instance.new("TextButton")
+    btn.Size             = UDim2.new(0, 42, 0, 22)
+    btn.AnchorPoint      = Vector2.new(1, 0.5)
+    btn.Position         = UDim2.new(1, 0, 0.5, 0)
+    btn.BorderSizePixel  = 0
+    btn.Font             = Enum.Font.GothamBold
+    btn.TextSize         = 11
+    btn.Parent           = wrap
+    Instance.new("UICorner", btn).CornerRadius = UDim.new(1, 0)
+
+    local lbl = Instance.new("TextLabel")
+    lbl.Size             = UDim2.new(1, -50, 1, 0)
+    lbl.BackgroundTransparency = 1
+    lbl.Text             = text
+    lbl.TextColor3       = Color3.fromRGB(200, 200, 210)
+    lbl.Font             = Enum.Font.Gotham
+    lbl.TextSize         = 12
+    lbl.TextXAlignment   = Enum.TextXAlignment.Left
+    lbl.Parent           = wrap
+
+    local state = default
+    local function refresh()
+        btn.BackgroundColor3 = state and Color3.fromRGB(0,200,100) or Color3.fromRGB(80,80,90)
+        btn.Text             = state and "ON" or "OFF"
+        btn.TextColor3       = Color3.new(1,1,1)
+    end
+    refresh()
+    btn.MouseButton1Click:Connect(function()
+        state = not state; refresh()
+        if onChange then onChange(state) end
+    end)
+    return function() return state end
+end
+
+-- Helper buat tombol
+local function mkButton(text, color, order, onClick)
+    local btn = Instance.new("TextButton")
+    btn.LayoutOrder       = order
+    btn.Size              = UDim2.new(1, 0, 0, 34)
+    btn.BackgroundColor3  = color
+    btn.Text              = text
+    btn.TextColor3        = Color3.new(1,1,1)
+    btn.Font              = Enum.Font.GothamBold
+    btn.TextSize          = 13
+    btn.BorderSizePixel   = 0
+    btn.Parent            = Content
+    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 7)
+    btn.MouseButton1Click:Connect(onClick)
+    return btn
+end
+
+-- ── Elemen UI ──
+mkLabel("Max Nilai Kristal yang Dibuang:", 1)
+local inputMaxVal = mkInput("Max Nilai:", "500k", 2)
+
+mkLabel("Jeda antar drop (ms, min 50):", 3)
+local inputDelay = mkInput("Delay (ms):", "80", 4)
+
+local getProtectMut = mkToggle("Lindungi kristal bermutasi", true, 5, nil)
+
+local StatusLbl = mkLabel("Status: siap", 6)
+StatusLbl.TextColor3 = Color3.fromRGB(100, 220, 100)
+StatusLbl.TextSize   = 12
+
+-- ── Separator ──
+local sep = Instance.new("Frame")
+sep.LayoutOrder        = 7
+sep.Size               = UDim2.new(1, 0, 0, 1)
+sep.BackgroundColor3   = Color3.fromRGB(60, 60, 80)
+sep.BorderSizePixel    = 0
+sep.Parent             = Content
+
+-- ── Tombol-tombol ──
+mkButton("DROP (pakai filter di atas)", Color3.fromRGB(0,160,230), 8, function()
+    if dropping then StatusLbl.Text = "Status: sedang berjalan..."; return end
+    local maxV  = parse(inputMaxVal.Text) or math.huge
+    local delay = (tonumber(inputDelay.Text) or 80) / 1000
+    delay = math.max(delay, 0.05)
+    local protMut = getProtectMut()
+    task.spawn(function()
+        dropAll(maxV, protMut, delay, function(s) StatusLbl.Text = "Status: "..s end)
+    end)
+end)
+
+mkButton("DROP < 100k  (Non-Mutasi)", Color3.fromRGB(50,130,50), 9, function()
+    if dropping then return end
+    local delay = math.max((tonumber(inputDelay.Text) or 80) / 1000, 0.05)
+    task.spawn(function()
+        dropAll(100000, true, delay, function(s) StatusLbl.Text = "Status: "..s end)
+    end)
+end)
+
+mkButton("DROP < 1M  (Non-Mutasi)", Color3.fromRGB(180,120,0), 10, function()
+    if dropping then return end
+    local delay = math.max((tonumber(inputDelay.Text) or 80) / 1000, 0.05)
+    task.spawn(function()
+        dropAll(1000000, true, delay, function(s) StatusLbl.Text = "Status: "..s end)
+    end)
+end)
+
+mkButton("DROP SEMUA (BAHAYA!)", Color3.fromRGB(180,30,30), 11, function()
+    if dropping then return end
+    local delay = math.max((tonumber(inputDelay.Text) or 80) / 1000, 0.05)
+    task.spawn(function()
+        dropAll(math.huge, false, delay, function(s) StatusLbl.Text = "Status: "..s end)
+    end)
+end)
+
+mkButton("STOP", Color3.fromRGB(80,80,90), 12, function()
+    dropping = false
+    StatusLbl.Text = "Status: dihentikan"
+end)
+
+-- Info VIM
+local vimLbl = mkLabel(
+    VIM and "VIM: aktif (drop terlihat semua player)"
+         or "VIM: tidak tersedia (coba executor lain)",
+    13
+)
+vimLbl.TextColor3 = VIM and Color3.fromRGB(100,255,100) or Color3.fromRGB(255,160,60)
+
+print("[CrystalDropper] Loaded! VIM:", VIM ~= nil)
