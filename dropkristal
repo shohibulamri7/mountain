@@ -1,418 +1,701 @@
--- ═══════════════════════════════════════════════
---  CRYSTAL DROPPER – Standalone, execute sendiri
---  Tidak butuh script utama. Drop = Equip + Backspace
--- ═══════════════════════════════════════════════
+-- ═══════════════════════════════════════════════════════════════════
+--  CRYSTAL TOOLS v3  –  Standalone, execute sendiri
+--  Fitur 1 : Die-to-Drop  → matikan karakter, semua item keluar
+--  Fitur 2 : Rune Dropper → drop rune cepat via Escape (1 ms / item)
+--  Fitur 3 : INSTANT Pickup → ambil LANGSUNG saat item jatuh
+--            Pakai firetouchinterest + DescendantAdded event
+-- ═══════════════════════════════════════════════════════════════════
 
-local LP  = game:GetService("Players").LocalPlayer
-local UIS = game:GetService("UserInputService")
+local Players    = game:GetService("Players")
+local UIS        = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+local LP         = Players.LocalPlayer
 
--- VirtualInputManager untuk simulasi Backspace server-side
+-- VirtualInputManager
 local VIM
 pcall(function() VIM = game:GetService("VirtualInputManager") end)
 
--- ── Attr helper ──
+-- Cek firetouchinterest (executor function)
+local hasFTI = (type(firetouchinterest) == "function")
+
+-- ── Attr helper ──────────────────────────────────────────────────
 local function attr(inst, name)
     if not inst then return nil end
     local ok, v = pcall(inst.GetAttribute, inst, name)
     return ok and v or nil
 end
 
-local function crVal(t)  return tonumber(attr(t,"Value"))    or 0 end
-local function crTier(t) return tonumber(attr(t,"Tier"))     or 0 end
-local function crMut(t)
-    local m = attr(t,"Mutation")
-    return type(m)=="string" and m~="" and m~="None"
-end
-local function crName(t)
-    local n = attr(t,"CrystalName")
-    return (type(n)=="string" and n~="") and n or t.Name
+local function isRune(t)
+    if not t or not t:IsA("Tool") then return false end
+    if attr(t, "RuneType") ~= nil then return true end
+    if attr(t, "Rune")     ~= nil then return true end
+    if t.Name:lower():find("rune") then return true end
+    return false
 end
 
--- Format angka singkat
-local function fmt(n)
-    n = tonumber(n) or 0
-    if n >= 1e12 then return string.format("%.1fT",n/1e12)
-    elseif n >= 1e9  then return string.format("%.1fB",n/1e9)
-    elseif n >= 1e6  then return string.format("%.1fM",n/1e6)
-    elseif n >= 1e3  then return string.format("%.1fk",n/1e3)
-    else return tostring(math.floor(n)) end
+local function isCrystal(t)
+    if not t or not t:IsA("Tool") then return false end
+    return attr(t, "Tier") ~= nil
 end
 
--- Parse "2m" → 2000000
-local function parse(s)
-    if type(s)~="string" then return nil end
-    s = s:lower():gsub("[%s,$]","")
-    local n,sf = s:match("^(%d*%.?%d+)(%a*)$")
-    if not n then return nil end
-    n = tonumber(n)
-    local mul = {k=1e3,m=1e6,b=1e9,t=1e12}
-    return n * (mul[sf] or 1)
+-- ── Cek apakah tool ada di inventory player (bukan lantai) ───────
+local function isInInventory(tool)
+    local p = tool.Parent
+    if not p then return true end -- sudah ke-delete
+    if p:IsA("Backpack") then return true end
+    local plr = Players:GetPlayerFromCharacter(p)
+    if plr then return true end
+    return false
 end
 
--- ── Scan kristal di inventory ──
-local function getInventory()
+-- ── Simulasi key press ───────────────────────────────────────────
+local function pressKey(keyCode, holdMs)
+    holdMs = math.max(holdMs or 10, 1)
+    if VIM then
+        pcall(function()
+            VIM:SendKeyEvent(true,  keyCode, false, game)
+            task.wait(holdMs / 1000)
+            VIM:SendKeyEvent(false, keyCode, false, game)
+        end)
+    else
+        pcall(function()
+            local inp = Instance.new("InputObject")
+            inp.KeyCode        = keyCode
+            inp.UserInputType  = Enum.UserInputType.Keyboard
+            inp.UserInputState = Enum.UserInputState.Begin
+            UIS.InputBegan:Fire(inp, false)
+            task.wait(holdMs / 1000)
+            inp.UserInputState = Enum.UserInputState.End
+            UIS.InputEnded:Fire(inp, false)
+        end)
+    end
+end
+
+-- ── Equip tool ───────────────────────────────────────────────────
+local function equipTool(tool)
+    local char = LP.Character
+    local hum  = char and char:FindFirstChildOfClass("Humanoid")
+    if not hum then return false end
+    return pcall(hum.EquipTool, hum, tool)
+end
+
+-- ── Scan inventory ───────────────────────────────────────────────
+local function getInventory(filterFn)
     local list = {}
     local function scan(c)
         if not c then return end
         for _, t in ipairs(c:GetChildren()) do
-            if t:IsA("Tool") and attr(t,"Tier") ~= nil then
-                list[#list+1] = t
+            if t:IsA("Tool") and (not filterFn or filterFn(t)) then
+                list[#list + 1] = t
             end
         end
     end
     scan(LP:FindFirstChildOfClass("Backpack"))
-    scan(LP.Character)
+    if LP.Character then scan(LP.Character) end
     return list
 end
 
--- ── Drop satu tool: equip → Backspace ──
-local function dropOne(tool)
+-- ════════════════════════════════════════════════════════════════
+--  CORE PICKUP — 4 metode bertingkat
+-- ════════════════════════════════════════════════════════════════
+local function pickupItem(tool)
+    if not tool or not tool.Parent then return false end
+    if isInInventory(tool) then return false end -- sudah di tas
+
     local char = LP.Character
-    local hum  = char and char:FindFirstChildOfClass("Humanoid")
-    if not hum then return false end
+    local hrp  = char and char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return false end
 
-    -- Equip
-    local ok = pcall(hum.EquipTool, hum, tool)
-    if not ok then return false end
-    task.wait(0.06)
+    -- Cari BasePart handle tool
+    local handle = tool:FindFirstChild("Handle")
+        or tool:FindFirstChildOfClass("BasePart")
+        or tool:FindFirstChildOfClass("MeshPart")
+        or tool:FindFirstChildOfClass("Part")
 
-    -- Backspace via VirtualInputManager (server-side, terlihat semua player)
-    if VIM then
+    -- ── Metode 1: firetouchinterest (paling efektif, executor support) ──
+    if hasFTI and handle then
         pcall(function()
-            VIM:SendKeyEvent(true,  Enum.KeyCode.Backspace, false, game)
-            task.wait(0.03)
-            VIM:SendKeyEvent(false, Enum.KeyCode.Backspace, false, game)
+            firetouchinterest(handle, hrp, 0)
+            task.wait(0.02)
+            firetouchinterest(handle, hrp, 1)
         end)
-        return true
+        task.wait(0.03)
+        if isInInventory(tool) then return true end
     end
 
-    -- Fallback: simulasi keydown via UIS (beberapa executor support)
-    pcall(function()
-        local f = Instance.new("InputObject")
-        f.KeyCode       = Enum.KeyCode.Backspace
-        f.UserInputType = Enum.UserInputType.Keyboard
-        f.UserInputState= Enum.UserInputState.Begin
-        UIS.InputBegan:Fire(f, false)
+    -- ── Metode 2: Teleport HRP ke item, trigger server Touch ──
+    if handle then
+        pcall(function()
+            local savedCF = hrp.CFrame
+            hrp.CFrame    = handle.CFrame * CFrame.new(0, 0.5, 0)
+            task.wait(0.05)
+            hrp.CFrame    = savedCF
+        end)
+        task.wait(0.05)
+        if isInInventory(tool) then return true end
+    end
+
+    -- ── Metode 3: Teleport item ke HRP (item datang ke kita) ──
+    if handle then
+        pcall(function()
+            local orig = handle.CFrame
+            for _ = 1, 3 do
+                handle.CFrame = hrp.CFrame * CFrame.new(0, 0, -1)
+                task.wait(0.05)
+                if isInInventory(tool) then break end
+            end
+        end)
+        task.wait(0.05)
+        if isInInventory(tool) then return true end
+    end
+
+    -- ── Metode 4: Reparent paksa ke Backpack ──
+    local bp = LP:FindFirstChildOfClass("Backpack")
+    if bp then
+        pcall(function() tool.Parent = bp end)
         task.wait(0.03)
-        f.UserInputState = Enum.UserInputState.End
-        UIS.InputEnded:Fire(f, false)
+        if isInInventory(tool) then return true end
+    end
+
+    -- ── Metode 5: FireServer RemoteEvent pickup ──
+    pcall(function()
+        local rs = game:GetService("ReplicatedStorage")
+        for _, v in ipairs(rs:GetDescendants()) do
+            if v:IsA("RemoteEvent") and
+               (v.Name:lower():find("pickup") or
+                v.Name:lower():find("collect") or
+                v.Name:lower():find("grab")) then
+                v:FireServer(tool)
+                break
+            end
+        end
     end)
-    return true
+
+    return isInInventory(tool)
 end
 
--- ── Drop semua yang sesuai filter ──
-local dropping = false
+-- ════════════════════════════════════════════════════════════════
+--  INSTANT PICKUP SYSTEM
+--  Dua jalur: DescendantAdded (reaktif) + backup loop (sweeper)
+-- ════════════════════════════════════════════════════════════════
+local pickupActive   = false
+local pickupTotal    = 0
+local pickupConn     = nil   -- koneksi DescendantAdded
+local pickupSweep    = nil   -- thread backup sweeper
+local pickupRadius   = 20    -- studs, bisa diubah dari UI
+local wantRune       = true
+local wantCrystal    = true
+local onPickStatus   = nil
 
-local function dropAll(maxVal, protectMut, delay, onStatus)
-    if dropping then return end
-    dropping = true
+-- Handler pickup untuk satu item
+local function handleItem(item)
+    if not pickupActive then return end
+    if not item:IsA("Tool") then return end
+    if isInInventory(item) then return end
 
-    local all = getInventory()
-    -- Filter
-    local list = {}
-    for _, t in ipairs(all) do
-        local v = crVal(t)
-        if v <= maxVal then
-            if protectMut and crMut(t) then
-                -- skip
-            else
-                list[#list+1] = t
+    local ok = (wantRune and isRune(item)) or (wantCrystal and isCrystal(item))
+    if not ok then return end
+
+    -- Cek radius jika diperlukan (radius 0 = ambil dari mana saja)
+    if pickupRadius > 0 then
+        local char = LP.Character
+        local hrp  = char and char:FindFirstChild("HumanoidRootPart")
+        if hrp then
+            local handle = item:FindFirstChildOfClass("BasePart")
+                or item:FindFirstChildOfClass("MeshPart")
+                or item:FindFirstChildOfClass("Part")
+            if handle then
+                local dist = (handle.Position - hrp.Position).Magnitude
+                if dist > pickupRadius then return end
             end
         end
     end
 
-    -- Sort: nilai terkecil dulu
-    table.sort(list, function(a,b) return crVal(a) < crVal(b) end)
+    local success = pickupItem(item)
+    if success then
+        pickupTotal = pickupTotal + 1
+        if onPickStatus then
+            onPickStatus(string.format(
+                "🧲 Pickup! %s | total: %d", item.Name, pickupTotal
+            ))
+        end
+    end
+end
 
-    local count = 0
-    for i, tool in ipairs(list) do
-        if not dropping then break end
+-- Sweep semua item di workspace (backup / saat baru start)
+local function sweepWorkspace()
+    local char = LP.Character
+    local hrp  = char and char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return end
+
+    local function scanNode(node, depth)
+        if depth > 8 then return end
+        local ok, children = pcall(node.GetChildren, node)
+        if not ok then return end
+        for _, obj in ipairs(children) do
+            if not pickupActive then return end
+            if obj:IsA("Tool") and not isInInventory(obj) then
+                task.spawn(handleItem, obj)
+            elseif obj:IsA("Folder") or obj:IsA("Model") then
+                scanNode(obj, depth + 1)
+            end
+        end
+    end
+    scanNode(workspace, 0)
+end
+
+local function startPickup(wR, wC, radius, onStatus)
+    if pickupActive then return end
+    pickupActive  = true
+    pickupTotal   = 0
+    wantRune      = wR
+    wantCrystal   = wC
+    pickupRadius  = radius
+    onPickStatus  = onStatus
+
+    -- ── Jalur 1: DescendantAdded (REAKTIF — langsung saat item muncul) ──
+    pickupConn = workspace.DescendantAdded:Connect(function(obj)
+        task.spawn(handleItem, obj)
+    end)
+
+    -- ── Jalur 2: Backup sweeper setiap 0.5 detik ──
+    pickupSweep = task.spawn(function()
+        while pickupActive do
+            sweepWorkspace()
+            if onPickStatus then
+                onPickStatus(string.format(
+                    "🟢 Aktif | radius %.0f studs | total: %d",
+                    pickupRadius, pickupTotal
+                ))
+            end
+            task.wait(0.5)
+        end
+    end)
+
+    -- Sweep pertama langsung
+    task.spawn(sweepWorkspace)
+
+    if onStatus then onStatus("✅ Instant Pickup aktif!") end
+end
+
+local function stopPickup()
+    pickupActive = false
+    if pickupConn then
+        pcall(function() pickupConn:Disconnect() end)
+        pickupConn = nil
+    end
+    if pickupSweep then
+        pcall(function() task.cancel(pickupSweep) end)
+        pickupSweep = nil
+    end
+end
+
+-- ════════════════════════════════════════════════════════════════
+--  FITUR 1 : Die-to-Drop
+-- ════════════════════════════════════════════════════════════════
+local function dieCharacter(onStatus)
+    local char = LP.Character
+    local hum  = char and char:FindFirstChildOfClass("Humanoid")
+    if not hum then
+        if onStatus then onStatus("❌ Humanoid tidak ditemukan!") end
+        return
+    end
+    if onStatus then onStatus("💀 Mematikan karakter...") end
+
+    pcall(function() hum.Health = 0 end)
+    if hum.Health > 0 then
+        pcall(function() hum:TakeDamage(math.huge) end)
+    end
+    if hum.Health > 0 then
+        pcall(function()
+            for _, v in ipairs(game:GetService("ReplicatedStorage"):GetDescendants()) do
+                if v:IsA("RemoteEvent") and v.Name:lower():find("kill") then
+                    v:FireServer(); break
+                end
+            end
+        end)
+    end
+
+    task.wait(0.6)
+    if onStatus then onStatus("✅ Karakter mati! Item di-drop ke lantai.") end
+end
+
+-- ════════════════════════════════════════════════════════════════
+--  FITUR 2 : Rune Dropper
+-- ════════════════════════════════════════════════════════════════
+local runeDropping = false
+
+local function dropRunes(nameFilter, delayMs, onStatus)
+    if runeDropping then return end
+    runeDropping = true
+
+    local runes = getInventory(function(t)
+        if not isRune(t) then return false end
+        if nameFilter and nameFilter ~= "" and nameFilter:lower() ~= "all" then
+            return t.Name:lower():find(nameFilter:lower(), 1, true) ~= nil
+        end
+        return true
+    end)
+
+    if #runes == 0 then
+        if onStatus then onStatus("⚠️ Tidak ada rune yang cocok!") end
+        runeDropping = false; return
+    end
+
+    local holdMs = math.max(math.floor(delayMs * 0.4), 1)
+    local waitMs = math.max(delayMs - holdMs, 1)
+    local count  = 0
+
+    for i, tool in ipairs(runes) do
+        if not runeDropping then break end
         if tool and tool.Parent then
-            if onStatus then onStatus(string.format("Drop %d/%d  %s ($%s)", i, #list, crName(tool), fmt(crVal(tool)))) end
-            dropOne(tool)
-            count = count + 1
-            task.wait(delay)
+            if onStatus then
+                onStatus(string.format("🔮 %d/%d → %s", i, #runes, tool.Name))
+            end
+            if equipTool(tool) then
+                task.wait(waitMs / 1000)
+                pressKey(Enum.KeyCode.Escape, holdMs)
+                task.wait(waitMs / 1000)
+                count = count + 1
+            end
         end
     end
 
-    dropping = false
-    if onStatus then onStatus(string.format("Selesai! %d kristal di-drop", count)) end
-    return count
+    runeDropping = false
+    if onStatus then onStatus(string.format("✅ %d rune di-drop.", count)) end
 end
 
--- ════════════════════════════════════════
---  UI SEDERHANA (ScreenGui sendiri)
--- ════════════════════════════════════════
-
--- Hapus GUI lama jika ada
+-- ════════════════════════════════════════════════════════════════
+--  GUI
+-- ════════════════════════════════════════════════════════════════
 local function getRoot()
     local ok, h = pcall(function() return gethui() end)
-    if ok and typeof(h)=="Instance" then return h end
+    if ok and typeof(h) == "Instance" then return h end
     return LP:FindFirstChildOfClass("PlayerGui") or game:GetService("CoreGui")
 end
 
 local guiRoot = getRoot()
-local oldGui  = guiRoot:FindFirstChild("CrystalDropper")
-if oldGui then oldGui:Destroy() end
+local old = guiRoot:FindFirstChild("CrystalTools_v3")
+if old then old:Destroy() end
 
-local ScreenGui = Instance.new("ScreenGui")
-ScreenGui.Name            = "CrystalDropper"
-ScreenGui.ResetOnSpawn    = false
-ScreenGui.ZIndexBehavior  = Enum.ZIndexBehavior.Sibling
-ScreenGui.DisplayOrder    = 999
-ScreenGui.IgnoreGuiInset  = true
-ScreenGui.Parent          = guiRoot
+local SG = Instance.new("ScreenGui")
+SG.Name            = "CrystalTools_v3"
+SG.ResetOnSpawn    = false
+SG.ZIndexBehavior  = Enum.ZIndexBehavior.Sibling
+SG.DisplayOrder    = 999
+SG.IgnoreGuiInset  = true
+SG.Parent          = guiRoot
 
--- Frame utama
+-- Warna
+local BG     = Color3.fromRGB(14, 14, 20)
+local PANEL  = Color3.fromRGB(22, 22, 32)
+local DARKER = Color3.fromRGB(10, 10, 16)
+local BLUE   = Color3.fromRGB(0, 170, 255)
+local PURPLE = Color3.fromRGB(140, 60, 255)
+local GREEN  = Color3.fromRGB(0, 200, 90)
+local RED    = Color3.fromRGB(210, 40, 40)
+local ORANGE = Color3.fromRGB(255, 140, 0)
+local TEXT   = Color3.fromRGB(220, 220, 235)
+local SUB    = Color3.fromRGB(130, 130, 155)
+local SEP    = Color3.fromRGB(38, 38, 58)
+
 local Main = Instance.new("Frame")
-Main.Name              = "Main"
-Main.Size              = UDim2.new(0, 320, 0, 400)
-Main.Position          = UDim2.new(0.5, -160, 0.5, -200)
-Main.BackgroundColor3  = Color3.fromRGB(20, 20, 28)
-Main.BorderSizePixel   = 0
-Main.Active            = true
-Main.Draggable         = true
-Main.Parent            = ScreenGui
-
-Instance.new("UICorner", Main).CornerRadius = UDim.new(0, 10)
-
--- Stroke
-local stroke = Instance.new("UIStroke", Main)
-stroke.Color     = Color3.fromRGB(0, 200, 255)
-stroke.Thickness = 1.5
+Main.Name             = "Main"
+Main.Size             = UDim2.new(0, 340, 0, 520)
+Main.Position         = UDim2.new(0.5, -170, 0.5, -260)
+Main.BackgroundColor3 = BG
+Main.BorderSizePixel  = 0
+Main.Active           = true
+Main.Draggable        = true
+Main.Parent           = SG
+Instance.new("UICorner", Main).CornerRadius = UDim.new(0, 12)
+local ms = Instance.new("UIStroke", Main)
+ms.Color = BLUE; ms.Thickness = 1.5
 
 -- Title bar
-local TitleBar = Instance.new("Frame")
-TitleBar.Size             = UDim2.new(1, 0, 0, 36)
-TitleBar.BackgroundColor3 = Color3.fromRGB(0, 150, 220)
-TitleBar.BorderSizePixel  = 0
-TitleBar.Parent           = Main
-Instance.new("UICorner", TitleBar).CornerRadius = UDim.new(0, 10)
+local TB = Instance.new("Frame")
+TB.Size = UDim2.new(1, 0, 0, 40)
+TB.BackgroundColor3 = BLUE
+TB.BorderSizePixel = 0
+TB.Parent = Main
+Instance.new("UICorner", TB).CornerRadius = UDim.new(0, 12)
+local TBFix = Instance.new("Frame")
+TBFix.Size = UDim2.new(1, 0, 0.5, 0)
+TBFix.AnchorPoint = Vector2.new(0, 1)
+TBFix.Position = UDim2.new(0, 0, 1, 0)
+TBFix.BackgroundColor3 = BLUE
+TBFix.BorderSizePixel = 0
+TBFix.Parent = TB
 
--- Fix sudut bawah titlebar
-local Fix = Instance.new("Frame")
-Fix.Size             = UDim2.new(1, 0, 0.5, 0)
-Fix.AnchorPoint      = Vector2.new(0, 1)
-Fix.Position         = UDim2.new(0, 0, 1, 0)
-Fix.BackgroundColor3 = Color3.fromRGB(0, 150, 220)
-Fix.BorderSizePixel  = 0
-Fix.Parent           = TitleBar
+local TL = Instance.new("TextLabel")
+TL.Size = UDim2.new(1, -46, 1, 0)
+TL.Position = UDim2.new(0, 12, 0, 0)
+TL.BackgroundTransparency = 1
+TL.Text = "⚡ Crystal Tools v3"
+TL.TextColor3 = Color3.new(1,1,1)
+TL.Font = Enum.Font.GothamBold
+TL.TextSize = 15
+TL.TextXAlignment = Enum.TextXAlignment.Left
+TL.Parent = TB
 
-local Title = Instance.new("TextLabel")
-Title.Size              = UDim2.new(1, -40, 1, 0)
-Title.Position          = UDim2.new(0, 12, 0, 0)
-Title.BackgroundTransparency = 1
-Title.Text              = "Crystal Dropper"
-Title.TextColor3        = Color3.new(1,1,1)
-Title.Font              = Enum.Font.GothamBold
-Title.TextSize          = 15
-Title.TextXAlignment    = Enum.TextXAlignment.Left
-Title.Parent            = TitleBar
+local CB = Instance.new("TextButton")
+CB.Size = UDim2.new(0, 30, 0, 30)
+CB.Position = UDim2.new(1, -34, 0, 5)
+CB.BackgroundColor3 = RED
+CB.Text = "✕"
+CB.TextColor3 = Color3.new(1,1,1)
+CB.Font = Enum.Font.GothamBold
+CB.TextSize = 13
+CB.BorderSizePixel = 0
+CB.Parent = TB
+Instance.new("UICorner", CB).CornerRadius = UDim.new(0, 6)
+CB.MouseButton1Click:Connect(function()
+    stopPickup(); runeDropping = false; SG:Destroy()
+end)
 
--- Tombol tutup
-local CloseBtn = Instance.new("TextButton")
-CloseBtn.Size             = UDim2.new(0, 30, 0, 30)
-CloseBtn.Position         = UDim2.new(1, -33, 0, 3)
-CloseBtn.BackgroundColor3 = Color3.fromRGB(220, 50, 50)
-CloseBtn.Text             = "✕"
-CloseBtn.TextColor3       = Color3.new(1,1,1)
-CloseBtn.Font             = Enum.Font.GothamBold
-CloseBtn.TextSize         = 14
-CloseBtn.BorderSizePixel  = 0
-CloseBtn.Parent           = TitleBar
-Instance.new("UICorner", CloseBtn).CornerRadius = UDim.new(0, 6)
-CloseBtn.MouseButton1Click:Connect(function() ScreenGui:Destroy() end)
+local Scroll = Instance.new("ScrollingFrame")
+Scroll.Size = UDim2.new(1, -16, 1, -50)
+Scroll.Position = UDim2.new(0, 8, 0, 46)
+Scroll.BackgroundTransparency = 1
+Scroll.ScrollBarThickness = 3
+Scroll.ScrollBarImageColor3 = BLUE
+Scroll.BorderSizePixel = 0
+Scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+Scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+Scroll.Parent = Main
 
--- Container isi
-local Content = Instance.new("Frame")
-Content.Size             = UDim2.new(1, -16, 1, -48)
-Content.Position         = UDim2.new(0, 8, 0, 42)
-Content.BackgroundTransparency = 1
-Content.Parent           = Main
+local SL = Instance.new("UIListLayout")
+SL.SortOrder = Enum.SortOrder.LayoutOrder
+SL.Padding   = UDim.new(0, 7)
+SL.Parent    = Scroll
 
-local Layout = Instance.new("UIListLayout")
-Layout.SortOrder    = Enum.SortOrder.LayoutOrder
-Layout.Padding      = UDim.new(0, 6)
-Layout.Parent       = Content
-
--- Helper buat label
-local function mkLabel(text, order)
+-- ── UI helpers ───────────────────────────────────────────────────
+local function mkSec(title, order, color)
+    local f = Instance.new("Frame")
+    f.LayoutOrder = order
+    f.Size = UDim2.new(1, 0, 0, 28)
+    f.BackgroundColor3 = color or PURPLE
+    f.BackgroundTransparency = 0.45
+    f.BorderSizePixel = 0
+    f.Parent = Scroll
+    Instance.new("UICorner", f).CornerRadius = UDim.new(0, 6)
     local l = Instance.new("TextLabel")
-    l.LayoutOrder        = order
-    l.Size               = UDim2.new(1, 0, 0, 18)
+    l.Size = UDim2.new(1,-10,1,0)
+    l.Position = UDim2.new(0,10,0,0)
     l.BackgroundTransparency = 1
-    l.Text               = text
-    l.TextColor3         = Color3.fromRGB(180, 180, 200)
-    l.Font               = Enum.Font.Gotham
-    l.TextSize           = 12
-    l.TextXAlignment     = Enum.TextXAlignment.Left
-    l.Parent             = Content
+    l.Text = title
+    l.TextColor3 = Color3.new(1,1,1)
+    l.Font = Enum.Font.GothamBold
+    l.TextSize = 12
+    l.TextXAlignment = Enum.TextXAlignment.Left
+    l.Parent = f
+end
+
+local function mkLbl(text, order, clr)
+    local l = Instance.new("TextLabel")
+    l.LayoutOrder = order
+    l.Size = UDim2.new(1, 0, 0, 15)
+    l.BackgroundTransparency = 1
+    l.Text = text
+    l.TextColor3 = clr or SUB
+    l.Font = Enum.Font.Gotham
+    l.TextSize = 11
+    l.TextXAlignment = Enum.TextXAlignment.Left
+    l.Parent = Scroll
     return l
 end
 
--- Helper buat input
-local function mkInput(label, default, order)
+local function mkStatus(order)
+    return mkLbl("Status: siap", order, GREEN)
+end
+
+local function mkInput(lbl, def, order)
     local wrap = Instance.new("Frame")
-    wrap.LayoutOrder        = order
-    wrap.Size               = UDim2.new(1, 0, 0, 32)
-    wrap.BackgroundColor3   = Color3.fromRGB(30, 30, 42)
-    wrap.BorderSizePixel    = 0
-    wrap.Parent             = Content
+    wrap.LayoutOrder = order
+    wrap.Size = UDim2.new(1, 0, 0, 30)
+    wrap.BackgroundColor3 = PANEL
+    wrap.BorderSizePixel = 0
+    wrap.Parent = Scroll
     Instance.new("UICorner", wrap).CornerRadius = UDim.new(0, 6)
-
-    local lbl = Instance.new("TextLabel")
-    lbl.Size              = UDim2.new(0, 110, 1, 0)
-    lbl.BackgroundTransparency = 1
-    lbl.Text              = label
-    lbl.TextColor3        = Color3.fromRGB(160, 160, 180)
-    lbl.Font              = Enum.Font.Gotham
-    lbl.TextSize          = 12
-    lbl.TextXAlignment    = Enum.TextXAlignment.Left
-    lbl.Position          = UDim2.new(0, 8, 0, 0)
-    lbl.Parent            = wrap
-
+    local ll = Instance.new("TextLabel")
+    ll.Size = UDim2.new(0,120,1,0)
+    ll.Position = UDim2.new(0,8,0,0)
+    ll.BackgroundTransparency = 1
+    ll.Text = lbl
+    ll.TextColor3 = SUB
+    ll.Font = Enum.Font.Gotham
+    ll.TextSize = 11
+    ll.TextXAlignment = Enum.TextXAlignment.Left
+    ll.Parent = wrap
     local box = Instance.new("TextBox")
-    box.Size              = UDim2.new(1, -120, 0, 24)
-    box.Position          = UDim2.new(0, 116, 0.5, -12)
-    box.BackgroundColor3  = Color3.fromRGB(40, 40, 56)
-    box.Text              = default
-    box.TextColor3        = Color3.new(1,1,1)
-    box.Font              = Enum.Font.Gotham
-    box.TextSize          = 13
-    box.ClearTextOnFocus  = false
-    box.BorderSizePixel   = 0
-    box.Parent            = wrap
+    box.Size = UDim2.new(1,-130,0,22)
+    box.Position = UDim2.new(0,126,0.5,-11)
+    box.BackgroundColor3 = DARKER
+    box.Text = def
+    box.TextColor3 = Color3.new(1,1,1)
+    box.Font = Enum.Font.Gotham
+    box.TextSize = 12
+    box.ClearTextOnFocus = false
+    box.BorderSizePixel = 0
+    box.Parent = wrap
     Instance.new("UICorner", box).CornerRadius = UDim.new(0, 4)
     return box
 end
 
--- Helper buat toggle
-local function mkToggle(text, default, order, onChange)
+local function mkToggle(text, default, order)
     local wrap = Instance.new("Frame")
-    wrap.LayoutOrder       = order
-    wrap.Size              = UDim2.new(1, 0, 0, 28)
+    wrap.LayoutOrder = order
+    wrap.Size = UDim2.new(1, 0, 0, 26)
     wrap.BackgroundTransparency = 1
-    wrap.Parent            = Content
-
+    wrap.Parent = Scroll
     local btn = Instance.new("TextButton")
-    btn.Size             = UDim2.new(0, 42, 0, 22)
-    btn.AnchorPoint      = Vector2.new(1, 0.5)
-    btn.Position         = UDim2.new(1, 0, 0.5, 0)
-    btn.BorderSizePixel  = 0
-    btn.Font             = Enum.Font.GothamBold
-    btn.TextSize         = 11
-    btn.Parent           = wrap
+    btn.Size = UDim2.new(0,44,0,22)
+    btn.AnchorPoint = Vector2.new(1,0.5)
+    btn.Position = UDim2.new(1,0,0.5,0)
+    btn.BorderSizePixel = 0
+    btn.Font = Enum.Font.GothamBold
+    btn.TextSize = 10
+    btn.Parent = wrap
     Instance.new("UICorner", btn).CornerRadius = UDim.new(1, 0)
-
-    local lbl = Instance.new("TextLabel")
-    lbl.Size             = UDim2.new(1, -50, 1, 0)
-    lbl.BackgroundTransparency = 1
-    lbl.Text             = text
-    lbl.TextColor3       = Color3.fromRGB(200, 200, 210)
-    lbl.Font             = Enum.Font.Gotham
-    lbl.TextSize         = 12
-    lbl.TextXAlignment   = Enum.TextXAlignment.Left
-    lbl.Parent           = wrap
-
+    local ll = Instance.new("TextLabel")
+    ll.Size = UDim2.new(1,-52,1,0)
+    ll.BackgroundTransparency = 1
+    ll.Text = text
+    ll.TextColor3 = TEXT
+    ll.Font = Enum.Font.Gotham
+    ll.TextSize = 11
+    ll.TextXAlignment = Enum.TextXAlignment.Left
+    ll.Parent = wrap
     local state = default
     local function refresh()
-        btn.BackgroundColor3 = state and Color3.fromRGB(0,200,100) or Color3.fromRGB(80,80,90)
-        btn.Text             = state and "ON" or "OFF"
-        btn.TextColor3       = Color3.new(1,1,1)
+        btn.BackgroundColor3 = state and GREEN or Color3.fromRGB(65,65,80)
+        btn.Text = state and "ON" or "OFF"
+        btn.TextColor3 = Color3.new(1,1,1)
     end
     refresh()
-    btn.MouseButton1Click:Connect(function()
-        state = not state; refresh()
-        if onChange then onChange(state) end
-    end)
+    btn.MouseButton1Click:Connect(function() state = not state; refresh() end)
     return function() return state end
 end
 
--- Helper buat tombol
-local function mkButton(text, color, order, onClick)
+local function mkBtn(text, color, order, fn)
     local btn = Instance.new("TextButton")
-    btn.LayoutOrder       = order
-    btn.Size              = UDim2.new(1, 0, 0, 34)
-    btn.BackgroundColor3  = color
-    btn.Text              = text
-    btn.TextColor3        = Color3.new(1,1,1)
-    btn.Font              = Enum.Font.GothamBold
-    btn.TextSize          = 13
-    btn.BorderSizePixel   = 0
-    btn.Parent            = Content
+    btn.LayoutOrder = order
+    btn.Size = UDim2.new(1, 0, 0, 32)
+    btn.BackgroundColor3 = color
+    btn.Text = text
+    btn.TextColor3 = Color3.new(1,1,1)
+    btn.Font = Enum.Font.GothamBold
+    btn.TextSize = 12
+    btn.BorderSizePixel = 0
+    btn.Parent = Scroll
     Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 7)
-    btn.MouseButton1Click:Connect(onClick)
+    btn.MouseButton1Click:Connect(fn)
     return btn
 end
 
--- ── Elemen UI ──
-mkLabel("Max Nilai Kristal yang Dibuang:", 1)
-local inputMaxVal = mkInput("Max Nilai:", "500k", 2)
+local function mkSep(order)
+    local s = Instance.new("Frame")
+    s.LayoutOrder = order
+    s.Size = UDim2.new(1, 0, 0, 1)
+    s.BackgroundColor3 = SEP
+    s.BorderSizePixel = 0
+    s.Parent = Scroll
+end
 
-mkLabel("Jeda antar drop (ms, min 50):", 3)
-local inputDelay = mkInput("Delay (ms):", "80", 4)
+-- ════════════════════════════════════════════════════════════════
+--  BUILD UI
+-- ════════════════════════════════════════════════════════════════
 
-local getProtectMut = mkToggle("Lindungi kristal bermutasi", true, 5, nil)
-
-local StatusLbl = mkLabel("Status: siap", 6)
-StatusLbl.TextColor3 = Color3.fromRGB(100, 220, 100)
-StatusLbl.TextSize   = 12
-
--- ── Separator ──
-local sep = Instance.new("Frame")
-sep.LayoutOrder        = 7
-sep.Size               = UDim2.new(1, 0, 0, 1)
-sep.BackgroundColor3   = Color3.fromRGB(60, 60, 80)
-sep.BorderSizePixel    = 0
-sep.Parent             = Content
-
--- ── Tombol-tombol ──
-mkButton("DROP (pakai filter di atas)", Color3.fromRGB(0,160,230), 8, function()
-    if dropping then StatusLbl.Text = "Status: sedang berjalan..."; return end
-    local maxV  = parse(inputMaxVal.Text) or math.huge
-    local delay = (tonumber(inputDelay.Text) or 80) / 1000
-    delay = math.max(delay, 0.05)
-    local protMut = getProtectMut()
-    task.spawn(function()
-        dropAll(maxV, protMut, delay, function(s) StatusLbl.Text = "Status: "..s end)
-    end)
-end)
-
-mkButton("DROP < 100k  (Non-Mutasi)", Color3.fromRGB(50,130,50), 9, function()
-    if dropping then return end
-    local delay = math.max((tonumber(inputDelay.Text) or 80) / 1000, 0.05)
-    task.spawn(function()
-        dropAll(100000, true, delay, function(s) StatusLbl.Text = "Status: "..s end)
-    end)
-end)
-
-mkButton("DROP < 1M  (Non-Mutasi)", Color3.fromRGB(180,120,0), 10, function()
-    if dropping then return end
-    local delay = math.max((tonumber(inputDelay.Text) or 80) / 1000, 0.05)
-    task.spawn(function()
-        dropAll(1000000, true, delay, function(s) StatusLbl.Text = "Status: "..s end)
-    end)
-end)
-
-mkButton("DROP SEMUA (BAHAYA!)", Color3.fromRGB(180,30,30), 11, function()
-    if dropping then return end
-    local delay = math.max((tonumber(inputDelay.Text) or 80) / 1000, 0.05)
-    task.spawn(function()
-        dropAll(math.huge, false, delay, function(s) StatusLbl.Text = "Status: "..s end)
-    end)
-end)
-
-mkButton("STOP", Color3.fromRGB(80,80,90), 12, function()
-    dropping = false
-    StatusLbl.Text = "Status: dihentikan"
-end)
-
--- Info VIM
-local vimLbl = mkLabel(
-    VIM and "VIM: aktif (drop terlihat semua player)"
-         or "VIM: tidak tersedia (coba executor lain)",
-    13
+-- Info eksekutor
+mkLbl(
+    hasFTI
+        and "✅ firetouchinterest tersedia — pickup paling efektif!"
+         or "⚠️  firetouchinterest tidak ada — pakai fallback teleport",
+    1,
+    hasFTI and GREEN or ORANGE
 )
-vimLbl.TextColor3 = VIM and Color3.fromRGB(100,255,100) or Color3.fromRGB(255,160,60)
+mkLbl(
+    VIM
+        and "✅ VIM aktif — input server-side"
+         or "⚠️  VIM tidak tersedia — UIS fallback",
+    2,
+    VIM and GREEN or ORANGE
+)
+mkSep(3)
 
-print("[CrystalDropper] Loaded! VIM:", VIM ~= nil)
+-- ── SECTION 1: Die-to-Drop ───────────────────────────────────────
+mkSec("💀  FITUR 1 — Die-to-Drop", 10, RED)
+mkLbl("Matikan karakter → semua kristal/rune jatuh ke lantai.", 11)
+local die_st = mkStatus(12)
+mkBtn("💀  MATIKAN KARAKTER", RED, 13, function()
+    task.spawn(function()
+        dieCharacter(function(s) die_st.Text = s end)
+    end)
+end)
+mkSep(14)
+
+-- ── SECTION 2: Rune Dropper ──────────────────────────────────────
+mkSec("🔮  FITUR 2 — Rune Dropper Cepat", 20, PURPLE)
+mkLbl("Equip → Escape bergantian. Delay bisa 1 ms per rune!", 21)
+local rune_delay  = mkInput("Delay (ms, min 1):", "1", 22)
+local rune_filter = mkInput("Filter nama ('all'):", "all", 23)
+local rune_st = mkStatus(24)
+mkBtn("🔮  DROP SEMUA RUNE", PURPLE, 25, function()
+    if runeDropping then rune_st.Text = "⏳ Sedang berjalan..."; return end
+    local d = math.max(tonumber(rune_delay.Text) or 1, 1)
+    local f = rune_filter.Text or "all"
+    task.spawn(function()
+        dropRunes(f, d, function(s) rune_st.Text = s end)
+    end)
+end)
+mkBtn("⛔  STOP Rune Drop", Color3.fromRGB(70,70,90), 26, function()
+    runeDropping = false
+    rune_st.Text = "■ Dihentikan."
+end)
+mkSep(27)
+
+-- ── SECTION 3: Instant Pickup ────────────────────────────────────
+mkSec("🧲  FITUR 3 — INSTANT Pickup (tas penuh OK)", GREEN, 30)
+mkLbl("Pickup LANGSUNG saat item jatuh via DescendantAdded event.", 31)
+mkLbl("Backup sweeper tiap 0.5 dtk untuk item yang sudah ada.", 32)
+
+local pick_radius = mkInput("Radius (0 = semua map):", "0", 33)
+mkLbl("  0 = ambil dari mana saja di map. >0 = dalam radius studs.", 34)
+
+local getPickRune  = mkToggle("Pickup Rune",    true,  35)
+local getPickCryst = mkToggle("Pickup Kristal", true,  36)
+
+local pick_st = mkStatus(37)
+
+local pickStartBtn = mkBtn("▶  MULAI INSTANT PICKUP", GREEN, 38, function() end)
+mkBtn("■  STOP Pickup", Color3.fromRGB(70,70,90), 39, function()
+    stopPickup()
+    pickStartBtn.BackgroundColor3 = GREEN
+    pick_st.Text = "■ Dihentikan."
+end)
+
+pickStartBtn.MouseButton1Click:Connect(function()
+    if pickupActive then pick_st.Text = "⏳ Sudah aktif!"; return end
+    local radius = tonumber(pick_radius.Text) or 0
+    local wR = getPickRune()
+    local wC = getPickCryst()
+    if not wR and not wC then pick_st.Text = "⚠️ Aktifkan Rune/Kristal!"; return end
+    startPickup(wR, wC, radius, function(s) pick_st.Text = s end)
+    pickStartBtn.BackgroundColor3 = Color3.fromRGB(0, 130, 50)
+    pick_st.Text = "🟢 Instant Pickup aktif!"
+end)
+
+mkSep(40)
+mkBtn("⛔  STOP SEMUA", RED, 41, function()
+    runeDropping = false
+    stopPickup()
+    pickStartBtn.BackgroundColor3 = GREEN
+    die_st.Text  = "■ Dihentikan."
+    rune_st.Text = "■ Dihentikan."
+    pick_st.Text = "■ Dihentikan."
+end)
+
+print(string.format(
+    "[CrystalTools v3] Loaded! VIM=%s | firetouchinterest=%s",
+    tostring(VIM ~= nil), tostring(hasFTI)
+))
